@@ -23,7 +23,7 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-from lib.reward_structure_mod import custom_reward_function, curiosity_reward
+from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
@@ -61,6 +61,19 @@ resize_transform = transforms.Compose([
     transforms.ToTensor()
 ])
 
+def preprocess_obs_for_policy(obs, device="cuda"):
+    """
+    Prepare a separate observation specifically for the model (policy input).
+    Converts `pov` to PyTorch tensor and reshapes to (1, 1, C, H, W).
+    """
+    if "pov" not in obs:
+        raise KeyError("'pov' key is missing in observation for policy input.")
+    
+    img = obs["pov"]  # Extract the POV image
+    img = th.tensor(img).permute(2, 0, 1)  # Convert (H, W, C) to (C, H, W)
+    img = img.unsqueeze(0).unsqueeze(0).to(device)  # Add batch and time dimensions
+    return {"img": img}
+
 
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
@@ -97,6 +110,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
         while not done:
             env.render()
+            obs_for_policy = preprocess_obs_for_policy(obs)
 
             # Get action using the agent's get_action method
             action = agent.get_action(obs)  # Handles preprocessing internally
@@ -113,15 +127,14 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
             # Compute rewards
             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
-            curiosity_bonus = curiosity_reward(obs)
-            total_reward = reward + curiosity_bonus
+            total_reward = reward
             cumulative_reward += total_reward
 
             # RL and KL Loss
-            _, v_pred, _ = agent.policy(obs, state_in=state, first=th.tensor([False]))
+            _, v_pred, _ = agent.policy(obs_for_policy, state_in=state, first=th.tensor([False]))
             advantage = total_reward - v_pred.item()
             loss_rl = -advantage * agent.policy.get_logprob_of_action(_, action)
-            loss_kl = compute_kl_loss(agent.policy, pretrained_policy.policy, obs)
+            loss_kl = compute_kl_loss(agent.policy, pretrained_policy.policy, obs_for_policy)
             total_loss = loss_rl + lambda_kl * loss_kl
 
             # Backpropagation
