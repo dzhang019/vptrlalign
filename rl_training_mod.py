@@ -154,60 +154,52 @@ def load_model_parameters(path_to_model_file):
 #     th.save(agent.policy.state_dict(), out_weights)
 
 def train_rl(in_model, in_weights, out_weights, num_episodes=10):
-    # 1) Create the environment
+    # Example hyperparameters
+    LEARNING_RATE = 1e-4
+    MAX_GRAD_NORM = 1.0      # For gradient clipping
+    LAMBDA_KL = 0.1          # KL regularization weight
+
     env = HumanSurvival(**ENV_KWARGS).make()
 
-    # 2) Load model parameters
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-
-    # 3) Initialize agent with pretrained weights
-    agent = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
+    agent = MineRLAgent(env, device="cuda",
+                        policy_kwargs=agent_policy_kwargs,
+                        pi_head_kwargs=agent_pi_head_kwargs)
     agent.load_weights(in_weights)
 
-    # 4) Create a separate copy of the pretrained policy for KL regularization
-    pretrained_policy = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
+    pretrained_policy = MineRLAgent(env, device="cuda",
+                                    policy_kwargs=agent_policy_kwargs,
+                                    pi_head_kwargs=agent_pi_head_kwargs)
     pretrained_policy.load_weights(in_weights)
 
-    # 5) RL Training Setup
-    visited_chunks = set()
-    optimizer = th.optim.Adam(agent.policy.parameters(), lr=0.0001)
-    lambda_kl = 0.1  # KL regularization weight
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
 
-    ####################################################################
-    # (A) Define a discount factor gamma
-    # (B) For stability, define a max grad norm for gradient clipping
-    ####################################################################
-    gamma = 0.99
-    MAX_GRAD_NORM = 5.0
+    running_loss = 0.0
+    total_steps = 0
 
     for episode in range(num_episodes):
         print(f"Starting episode {episode}")
-        raw_obs = env.reset()  # Use raw observation from the environment
+        obs = env.reset()
         done = False
-        cumulative_reward = 0
+        cumulative_reward = 0.0
 
-        # 6) Explicitly initialize hidden states at episode start
-        state = agent.policy.initial_state(batch_size=1)
-        dummy_first = th.tensor([True]).to("cuda")  # Mark first step
-
-        obs_for_policy = agent._env_obs_to_agent(raw_obs)  # Preprocess obs
-        obs_for_policy = tree_map(lambda x: x.unsqueeze(1), obs_for_policy)
+        # Initialize RNN hidden state and 'first' flag for each episode
+        agent_state = agent.policy.initial_state(batch_size=1)
+        # This indicates to the policy that it's the first step of a new episode
+        first = th.tensor([True], dtype=th.bool, device="cuda")
 
         while not done:
-            ####################################################################
-            # (Optional) You can comment out env.render() or put it behind a
-            # "if RENDER: env.render()" to reduce overhead in training.
-            ####################################################################
             env.render()
 
-            # 7) Forward pass: get logits & values
-            action_logits, v_pred, state = agent.policy.get_output_for_observation(obs_for_policy, state, dummy_first)
-            action = agent._agent_action_to_env(action_logits)
-            print(f"Action sent to env.step(): {action}")
+            # -----------------------------------------------------------------
+            # A) Get the actual action from the agent
+            #    (agent.get_action() typically includes its own internal
+            #     preprocessing + sampling.)
+            action = agent.get_action(obs)
 
-            # 8) Environment step
+            # B) Step the environment with that action
             try:
-                next_raw_obs, env_reward, done, info = env.step(action)
+                next_obs, env_reward, done, info = env.step(action)
                 if 'error' in info:
                     print(f"Error in info: {info['error']}. Ending episode.")
                     break
@@ -215,56 +207,71 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
                 print(f"Error during env.step(): {e}")
                 break
 
-            # 9) Compute custom reward
-            reward, visited_chunks = custom_reward_function(raw_obs, done, info, visited_chunks)
-            total_reward = reward
-            cumulative_reward += total_reward
+            reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks=None)
+            cumulative_reward += reward
 
-            dummy_first = th.tensor([False]).to("cuda")  # subsequent steps
 
-            # 10) Preprocess next obs
-            next_obs_for_policy = agent._env_obs_to_agent(next_raw_obs)
-            next_obs_for_policy = tree_map(lambda x: x.unsqueeze(1), next_obs_for_policy)
+            obs_for_policy = agent._env_obs_to_agent(obs)
 
-            # 11) Get the next state’s value for single-step TD
-            next_action_logits, next_v_pred, next_state = agent.policy.get_output_for_observation(
-                next_obs_for_policy, state, dummy_first
+            obs_for_policy = tree_map(lambda x: x.unsqueeze(1), obs_for_policy)
+
+            # Forward pass through the policy (distribution + value + next hidden state)
+            pi_dist, v_pred, new_agent_state = agent.policy(
+                obs_for_policy,
+                state_in=agent_state,
+                first=first
             )
 
-            ####################################################################
-            # (C) Single-step TD advantage:
-            #     advantage = r + gamma * (1 - done) * V(next_state) - V(state)
-            ####################################################################
-            done_float = float(done)
-            advantage = total_reward + gamma * (1.0 - done_float) * next_v_pred.item() - v_pred.item()
+            # Convert scalar v_pred to float
+            v_pred_val = v_pred.item() if hasattr(v_pred, 'item') else v_pred
 
-            # 12) Policy gradient loss & KL regularization
-            log_prob = agent.policy.get_logprob_of_action(action_logits, action)
+            # Negative log-prob of the action we actually took
+            log_prob = agent.policy.get_logprob_of_action(pi_dist, action)
+
+            # Single-step advantage: (reward - baseline)
+            advantage = reward - v_pred_val
             loss_rl = -advantage * log_prob
-            loss_kl = compute_kl_loss(agent.policy, pretrained_policy.policy, next_obs_for_policy)
-            total_loss = loss_rl + lambda_kl * loss_kl
 
-            # 13) Backpropagation with gradient clipping
+            # KL regularization:
+            #   We get the old distribution from the pretrained policy.
+            #   Note: we often pass the same obs_for_policy (and maybe a dummy hidden state)
+            with th.no_grad():
+                old_pi_dist, _, _ = pretrained_policy.policy(
+                    obs_for_policy,
+                    pretrained_policy.policy.initial_state(1),
+                    first=th.tensor([False], dtype=th.bool, device="cuda")
+                )
+
+            loss_kl = compute_kl_loss(pi_dist, old_pi_dist)
+            total_loss = loss_rl + LAMBDA_KL * loss_kl
+
+            # Backprop
             optimizer.zero_grad()
             total_loss.backward()
+
+            # Gradient clipping (as in BC)
             th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 
-            ####################################################################
-            # (D) Detach states to prevent unbounded backprop through time
-            #     If your policy is recurrent (LSTM/GRU), always consider
-            #     detaching after each update. This prevents massive graphs.
-            ####################################################################
-            next_state = tree_map(lambda x: x.detach(), next_state)
+            # Update hidden states for the next step
+            agent_state = tree_map(lambda x: x.detach(), new_agent_state)
+            first = th.tensor([False], dtype=th.bool, device="cuda")
 
-            # 14) Update obs/state for next loop
-            raw_obs = next_raw_obs
-            obs_for_policy = next_obs_for_policy
-            state = next_state
+            # Update obs for next iteration
+            obs = next_obs
 
-        print(f"Episode {episode}: Cumulative reward = {cumulative_reward}")
+            # Logging
+            running_loss += total_loss.item()
+            total_steps += 1
 
-    # 15) Save fine-tuned weights
+        print(f"Episode {episode} finished. Cumulative reward = {cumulative_reward}")
+
+        # Print average loss every episode (or at any desired frequency)
+        if total_steps > 0:
+            avg_loss = running_loss / total_steps
+            print(f" Steps so far: {total_steps}, average training loss: {avg_loss:.4f}")
+
+    # 7) Save the fine-tuned weights
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
 
