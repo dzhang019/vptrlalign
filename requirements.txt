@@ -1,3 +1,0 @@
-gym3
-attrs
-opencv-python
