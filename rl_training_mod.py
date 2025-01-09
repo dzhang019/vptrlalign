@@ -69,7 +69,7 @@ def preprocess_obs_for_policy(obs, device="cuda"):
     if "pov" not in obs:
         raise KeyError("'pov' key is missing in observation for policy input.")
     
-    img = obs["pov"]  # Extract the POV image
+    img = obs["pov"].copy()  # Extract the POV image
     img = th.tensor(img).permute(2, 0, 1)  # Convert (H, W, C) to (C, H, W)
     img = img.unsqueeze(0).unsqueeze(0).to(device)  # Add batch and time dimensions
     return {"img": img}
@@ -110,12 +110,14 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
         while not done:
             env.render()
-            obs_for_policy = preprocess_obs_for_policy(obs)
-
+            obs_for_policy = agent._env_obs_to_agent(obs)
+            obs_for_policy = tree_map(lambda x: x.unsqueeze(1), obs_for_policy)
+            print(f"Shape of obs_for_policy['img'] before action computation: {obs_for_policy['img'].shape}")
+            print(f"Shape of obs['pov'] before action computation: {obs['pov'].shape}")
             # Get action using the agent's get_action method
             action = agent.get_action(obs)  # Handles preprocessing internally
             print(f"Action sent to env.step(): {action}")
-
+            
             try:
                 next_obs, env_reward, done, info = env.step(action)
                 if 'error' in info:
@@ -131,6 +133,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             cumulative_reward += total_reward
 
             # RL and KL Loss
+            print(f"Shape of obs_for_policy['img'] before loss computation: {obs_for_policy['img'].shape}")
             _, v_pred, _ = agent.policy(obs_for_policy, state_in=state, first=th.tensor([False]))
             advantage = total_reward - v_pred.item()
             loss_rl = -advantage * agent.policy.get_logprob_of_action(_, action)
