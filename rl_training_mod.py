@@ -19,15 +19,14 @@ import minerl
 import torch as th
 import numpy as np
 
-from agent_mod import PI_HEAD_KWARGS, MineRLAgent
+from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
 from lib.reward_structure_mod import custom_reward_function, curiosity_reward
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
-
-
+from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 
 
 EPOCHS = 2
@@ -61,32 +60,6 @@ resize_transform = transforms.Compose([
     transforms.Resize((128, 128)),  # Resize to 128x128
     transforms.ToTensor()
 ])
-# def preprocess_obs(obs, device="cuda"):
-#     """
-#     Rename 'pov' to 'img', ensure correct dimensions, and move to the correct device.
-#     """
-#     if "pov" in obs:
-#         img = obs.pop("pov")
-#         # Ensure the image has exactly 5 dimensions: (batch, time, height, width, channels)
-#         if img.ndim == 3:  # (H, W, C)
-#             img = img.unsqueeze(0).unsqueeze(0)  # Add batch and time dimensions
-#         elif img.ndim == 4:  # (Batch, H, W, C)
-#             img = img.unsqueeze(1)  # Add time dimension
-#         obs["img"] = img.to(device)  # Move to GPU if necessary
-#     return obs
-def preprocess_obs(obs, device="cuda"):
-    """
-    Preprocess observations: Resize to 128x128 to match model expectations and move to the GPU.
-    """
-    if "pov" in obs:
-        img = obs.pop("pov")  # Extract the POV image
-        img = img.permute(2, 0, 1)  # Convert (H, W, C) to (C, H, W)
-        img = resize_transform(img)  # Resize to 128x128
-        img = img.permute(1, 2, 0).unsqueeze(0).unsqueeze(0).to(device)  # Add batch/time dims
-        obs["img"] = img
-        obs["pov"] = img  # Duplicate 'img' under 'pov' for compatibility
-    return obs
-
 
 
 def load_model_parameters(path_to_model_file):
@@ -96,153 +69,8 @@ def load_model_parameters(path_to_model_file):
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
 
-# def train_rl(in_model, in_weights, out_weights, num_episodes=10):
-#     # Load environment
-#     env = gym.make("MineRLBasaltFindCave-v0")
-
-#     # Load model parameters
-#     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-
-#     # Initialize agent with pretrained weights
-#     agent = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
-#     agent.load_weights(in_weights)
-
-#     # Create a separate copy of the pretrained policy for KL regularization
-#     pretrained_policy = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
-#     pretrained_policy.load_weights(in_weights)
-
-#     # RL Training
-#     visited_chunks = set()  # Track visited chunks for exploration rewards
-#     optimizer = th.optim.Adam(agent.policy.parameters(), lr=0.0001)
-#     lambda_kl = 0.1  # KL regularization weight
-
-#     for episode in range(num_episodes):
-#         obs = preprocess_obs(convert_to_torch(env.reset()))
-#         #print(f"Shape after preprocessing: {obs['img'].shape}")
-#         #print(f"Observation structure: {obs}")
-
-#         done = False
-#         cumulative_reward = 0
-#         state = agent.policy.initial_state(batch_size=1)
-
-#         while not done:
-#             # Display environment view
-#             env.render()
-
-#             # Get action from the agent
-#             action, state, _ = agent.policy.act(obs, first=th.tensor([False]), state_in=state)
-#             next_obs, env_reward, done, info = env.step(action)
-#             print("Info dictionary:", info)
-#             next_obs = preprocess_obs(convert_to_torch(next_obs))
-
-#             # Compute custom rewards
-#             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
-#             curiosity_bonus = curiosity_reward(obs)
-#             total_reward = reward + curiosity_bonus
-#             cumulative_reward += total_reward
-
-#             # RL and KL Loss
-#             _, v_pred, _ = agent.policy(obs, state_in=state, first=th.tensor([False]))
-#             advantage = total_reward - v_pred.item()
-#             loss_rl = -advantage * agent.policy.get_logprob_of_action(_, action)
-#             loss_kl = compute_kl_loss(pretrained_policy.policy, agent.policy, obs)
-#             total_loss = loss_rl + lambda_kl * loss_kl
-
-#             # Backpropagation
-#             optimizer.zero_grad()
-#             total_loss.backward()  # Compute gradients
-#             optimizer.step()       # Update policy parameters
-
-#             obs = next_obs  # Move to the next step
-
-#         print(f"Episode {episode}: Cumulative reward = {cumulative_reward}")
-
-#     # Save fine-tuned weights
-#     print(f"Saving fine-tuned weights to {out_weights}")
-#     th.save(agent.policy.state_dict(), out_weights)
-
-# def train_rl(in_model, in_weights, out_weights, num_episodes=10):
-#     # Load environment
-#     env = gym.make("MineRLBasaltFindCave-v0")
-
-#     # Load model parameters
-#     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-
-#     # Initialize agent with pretrained weights
-#     agent = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
-#     agent.load_weights(in_weights)
-
-#     # Create a separate copy of the pretrained policy for KL regularization
-#     pretrained_policy = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
-#     pretrained_policy.load_weights(in_weights)
-
-#     # RL Training
-#     visited_chunks = set()  # Track visited chunks for exploration rewards
-#     optimizer = th.optim.Adam(agent.policy.parameters(), lr=0.0001)
-#     lambda_kl = 0.1  # KL regularization weight
-
-#     for episode in range(num_episodes):
-#         print(f"Starting episode {episode}")
-
-#         # Reset the environment and preprocess the observation
-#         obs = preprocess_obs(convert_to_torch(env.reset()))
-#         print(f"Observation keys after reset: {obs.keys()}")
-
-#         done = False
-#         cumulative_reward = 0
-#         state = agent.policy.initial_state(batch_size=1)
-
-#         while not done:
-#             # Display environment view
-#             env.render()
-
-#             # Get action from the agent
-#             action, state, _ = agent.policy.act(obs, first=th.tensor([False], device="cuda"), state_in=state)
-
-#             # Convert action to CPU and NumPy format
-#             action = {k: v.cpu().numpy() if isinstance(v, th.Tensor) else v for k, v in action.items()}
-#             print(f"Action sent to env.step(): {action}")
-
-#             # Perform the environment step
-#             try:
-#                 next_obs, env_reward, done, info = env.step(action)
-#                 print(f"Info dictionary: {info}")
-#             except Exception as e:
-#                 print(f"Error during env.step(): {e}")
-#                 break  # Terminate the loop gracefully on error
-
-#             # Preprocess the next observation
-#             next_obs = preprocess_obs(convert_to_torch(next_obs))
-
-#             # Compute custom rewards
-#             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
-#             curiosity_bonus = curiosity_reward(obs)
-#             total_reward = reward + curiosity_bonus
-#             cumulative_reward += total_reward
-
-#             # RL and KL Loss
-#             _, v_pred, _ = agent.policy(obs, state_in=state, first=th.tensor([False]))
-#             advantage = total_reward - v_pred.item()
-#             loss_rl = -advantage * agent.policy.get_logprob_of_action(_, action)
-#             loss_kl = compute_kl_loss(pretrained_policy.policy, agent.policy, obs)
-#             total_loss = loss_rl + lambda_kl * loss_kl
-
-#             # Backpropagation
-#             optimizer.zero_grad()
-#             total_loss.backward()  # Compute gradients
-#             optimizer.step()       # Update policy parameters
-
-#             obs = next_obs  # Move to the next step
-
-#         print(f"Episode {episode}: Cumulative reward = {cumulative_reward}")
-
-#     # Save fine-tuned weights
-#     print(f"Saving fine-tuned weights to {out_weights}")
-#     th.save(agent.policy.state_dict(), out_weights)
-
 def train_rl(in_model, in_weights, out_weights, num_episodes=10):
-    # Load environment
-    env = gym.make("MineRLBasaltFindCave-v0")
+    env = HumanSurvival(**ENV_KWARGS).make()
 
     # Load model parameters
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
@@ -255,7 +83,6 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     pretrained_policy = MineRLAgent(env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
     pretrained_policy.load_weights(in_weights)
 
-
     # RL Training
     visited_chunks = set()
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=0.0001)
@@ -263,8 +90,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
     for episode in range(num_episodes):
         print(f"Starting episode {episode}")
-        obs = preprocess_obs(convert_to_torch(env.reset()))
-        #print(f"Raw obs after reset: {obs}")
+        obs = env.reset()  # Use raw observation from the environment
         done = False
         cumulative_reward = 0
         state = agent.policy.initial_state(batch_size=1)
@@ -273,9 +99,9 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             env.render()
 
             # Get action using the agent's get_action method
-            action = agent.get_action(obs)
+            action = agent.get_action(obs)  # Handles preprocessing internally
             print(f"Action sent to env.step(): {action}")
-            # Step the environment
+
             try:
                 next_obs, env_reward, done, info = env.step(action)
                 if 'error' in info:
@@ -284,9 +110,6 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             except Exception as e:
                 print(f"Error during env.step(): {e}")
                 break
-
-            # Preprocess next observation
-            next_obs = preprocess_obs(convert_to_torch(next_obs))
 
             # Compute rewards
             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
@@ -313,6 +136,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     # Save fine-tuned weights
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
+
 
 
 
