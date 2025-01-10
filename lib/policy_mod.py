@@ -18,15 +18,20 @@ from lib.util import FanInInitReLULayer, ResidualRecurrentBlocks
 from lib.misc import transpose
 
 #standalone global kl_loss function
-def compute_kl_loss(pretrained_policy, current_policy, obs):
-        pretrained_logits = pretrained_policy(obs)
-        current_logits = current_policy(obs)
+def compute_kl_loss(current_logits_dict, old_logits_dict):
+    kl_total = 0.0
+    num_heads = 0
+    for key in current_logits_dict.keys():
+        current_logits = current_logits_dict[key]
+        pretrained_logits = old_logits_dict[key]
         kl_loss = F.kl_div(
             F.log_softmax(current_logits, dim=-1),
             F.softmax(pretrained_logits, dim=-1),
             reduction='batchmean'
         )
-        return kl_loss
+        kl_total += kl_loss
+        num_heads +=1
+    return kl_total / num_heads
 
 class ImgPreprocessing(nn.Module):
     """Normalize incoming images.
@@ -225,6 +230,8 @@ class MinecraftPolicy(nn.Module):
             x = self.pre_lstm_ln(x)
 
         if self.recurrent_layer is not None:
+
+            print("Inside MinecraftPolicy.forward, first.shape =", first.shape)
             x, state_out = self.recurrent_layer(x, first, state_in)
         else:
             state_out = state_in
