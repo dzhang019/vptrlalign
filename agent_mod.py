@@ -216,3 +216,40 @@ class MineRLAgent:
         )
         minerl_action = self._agent_action_to_env(agent_action)
         return minerl_action
+    
+    def get_action_and_training_info(self, minerl_obs, stochastic=True):
+        """
+        Similar to get_action(...), but also returns additional info
+        for RL training (policy distribution, value prediction, log-prob).
+
+        This avoids doing a second forward pass for training:
+        you get everything from the same call that determines the action.
+        """
+        # 1) Convert the MineRL environment observation into the agent's observation
+        agent_input = self._env_obs_to_agent(minerl_obs)
+
+        # 2) Call policy.act(...) exactly like in get_action(...), 
+        #    but set return_pd=True so we get distribution info (pd).
+        agent_action, new_hidden_state, result = self.policy.act(
+            agent_input,
+            self._dummy_first,     # same first-flag usage as get_action
+            self.hidden_state,     # same hidden-state usage as get_action
+            stochastic=stochastic,
+            return_pd=True         # <--- We need the distribution for training
+        )
+
+        # 3) Convert the agent_action (PyTorch dict) to a MineRL env action
+        minerl_action = self._agent_action_to_env(agent_action)
+
+        # 4) Update the agent's hidden state internally (same as get_action does)
+        self.hidden_state = new_hidden_state
+
+        # 5) Extract extras from 'result':
+        #    By default, result["log_prob"] and result["vpred"] are 1D (batch_size=1).
+        log_prob = result["log_prob"]
+        vpred = result["vpred"]
+        # pd was only returned because return_pd=True
+        pi_dist = result.get("pd", None)
+
+        # Return everything needed for both environment stepping + RL training
+        return minerl_action, pi_dist, vpred, log_prob, new_hidden_state

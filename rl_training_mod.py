@@ -161,17 +161,23 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
     env = HumanSurvival(**ENV_KWARGS).make()
 
+    # Load parameters for both current agent and pretrained agent
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-    agent = MineRLAgent(env, device="cuda",
-                        policy_kwargs=agent_policy_kwargs,
-                        pi_head_kwargs=agent_pi_head_kwargs)
+    agent = MineRLAgent(
+        env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
     agent.load_weights(in_weights)
 
-    pretrained_policy = MineRLAgent(env, device="cuda",
-                                    policy_kwargs=agent_policy_kwargs,
-                                    pi_head_kwargs=agent_pi_head_kwargs)
+    pretrained_policy = MineRLAgent(
+        env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
     pretrained_policy.load_weights(in_weights)
 
+    # Optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
 
     running_loss = 0.0
@@ -183,23 +189,29 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
         done = False
         cumulative_reward = 0.0
         visited_chunks = set()
-        # Initialize RNN hidden state and 'first' flag for each episode
-        agent_state = agent.policy.initial_state(batch_size=1)
-        # This indicates to the policy that it's the first step of a new episode
-        first = th.tensor([[True]], dtype=th.bool, device="cuda")
-        #print("train_rl, right after first initialization. first.shape =",first.shape)
+
+        # Optionally reset agent's internal hidden state if needed
+        # e.g., agent.reset() if you have such a method, or manually.
+        # For example:
+        # agent.hidden_state = agent.policy.initial_state(batch_size=1)
+
         while not done:
             env.render()
 
-            # -----------------------------------------------------------------
-            # A) Get the actual action from the agent
-            #    (agent.get_action() typically includes its own internal
-            #     preprocessing + sampling.)
-            action = agent.get_action(obs)
-            print(action)
-            # B) Step the environment with that action
+            # 1) SINGLE FORWARD PASS with new method:
+            #    get_action_and_training_info(obs) gives us:
+            #      - 'minerl_action' to pass to env.step
+            #      - 'pi_dist' (distribution for log-prob or KL)
+            #      - 'v_pred' (value estimate)
+            #      - 'log_prob' of the chosen action
+            #      - 'new_hidden_state' is also returned, but if the agent
+            #        tracks hidden_state internally, we might not need it here.
+            minerl_action, pi_dist, v_pred, log_prob, new_hidden_state = \
+                agent.get_action_and_training_info(obs, stochastic=True)
+
+            # 2) Step the environment with 'minerl_action'
             try:
-                next_obs, env_reward, done, info = env.step(action)
+                next_obs, env_reward, done, info = env.step(minerl_action)
                 if 'error' in info:
                     print(f"Error in info: {info['error']}. Ending episode.")
                     break
@@ -207,38 +219,25 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
                 print(f"Error during env.step(): {e}")
                 break
 
+            # 3) Compute your custom reward
             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
             cumulative_reward += reward
 
-            #print("train_rl. first.shape right after environment is stepped=",first.shape)
-            obs_for_policy = agent._env_obs_to_agent(obs)
-
-            obs_for_policy = tree_map(lambda x: x.unsqueeze(1), obs_for_policy)
-
-            # Forward pass through the policy (distribution + value + next hidden state)
-            #print("train_rl: right before agent.policy, first.shape =", first.shape)
-            (pi_dist, v_pred, _), new_agent_state = agent.policy(
-                obs=obs_for_policy,
-                first=first,
-                state_in=agent_state
-            )
-
-            # Convert scalar v_pred to float
+            # 4) Single-step advantage (still naive)
+            #    advantage = reward - V(s), but you might want a next-state bootstrap, etc.
             v_pred_val = v_pred.item() if hasattr(v_pred, 'item') else v_pred
-            action_th = agent._env_action_to_agent(action, to_torch=True)
-            # Negative log-prob of the action we actually took
-            log_prob = agent.policy.get_logprob_of_action(pi_dist, action_th)
-
-            # Single-step advantage: (reward - baseline)
             advantage = reward - v_pred_val
             loss_rl = -advantage * log_prob
 
-            # KL regularization:
-            #   We get the old distribution from the pretrained policy.
-            #   Note: we often pass the same obs_for_policy (and maybe a dummy hidden state)
+            # 5) KL regularization with the pretrained policy
+            #    we do a forward pass on 'obs' for the pretrained policy distribution
+            #    so we can measure distance.  We'll do the same "env_obs_to_agent" logic.
             with th.no_grad():
-                (old_pi_dist, v_out, _), old_state_out = pretrained_policy.policy(
-                    obs=obs_for_policy,
+                obs_for_pretrained = agent._env_obs_to_agent(obs)
+                obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+
+                (old_pi_dist, _, _), _ = pretrained_policy.policy(
+                    obs=obs_for_pretrained,
                     state_in=pretrained_policy.policy.initial_state(1),
                     first=th.tensor([[False]], dtype=th.bool, device="cuda")
                 )
@@ -246,36 +245,25 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             loss_kl = compute_kl_loss(pi_dist, old_pi_dist)
             total_loss = loss_rl + LAMBDA_KL * loss_kl
 
-            # Backprop
+            # 6) Backprop and update
             optimizer.zero_grad()
             total_loss.backward()
-
-            # Gradient clipping (as in BC)
             th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 
-            # Update hidden states for the next step
-            agent_state = tree_map(lambda x: x.detach(), new_agent_state)
-            first = th.tensor([[False]], dtype=th.bool, device="cuda")
-
-            # Update obs for next iteration
             obs = next_obs
-
-            # Logging
             running_loss += total_loss.item()
             total_steps += 1
 
         print(f"Episode {episode} finished. Cumulative reward = {cumulative_reward}")
 
-        # Print average loss every episode (or at any desired frequency)
         if total_steps > 0:
             avg_loss = running_loss / total_steps
             print(f" Steps so far: {total_steps}, average training loss: {avg_loss:.4f}")
 
-    # 7) Save the fine-tuned weights
+    # Save fine-tuned weights
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
-
 
 
 
