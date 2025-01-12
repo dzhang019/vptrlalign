@@ -155,7 +155,8 @@ def load_model_parameters(path_to_model_file):
 
 def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     # Example hyperparameters
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 0
+    #1e-5
     MAX_GRAD_NORM = 1.0      # For gradient clipping
     LAMBDA_KL = 0.1          # KL regularization weight
 
@@ -176,7 +177,8 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
         pi_head_kwargs=agent_pi_head_kwargs
     )
     pretrained_policy.load_weights(in_weights)
-
+    for agent_param, pretrained_param in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
+        assert not (agent_param.data_ptr() == pretrained_param.data_ptr()), "Weights are shared!"
     # Optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
 
@@ -208,7 +210,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             #        tracks hidden_state internally, we might not need it here.
             minerl_action, pi_dist, v_pred, log_prob, new_hidden_state = \
                 agent.get_action_and_training_info(obs, stochastic=True)
-
+            print("train_rl: log_prob.requires_grad rights after .get_action_and_training_info", log_prob.requires_grad)
             # 2) Step the environment with 'minerl_action'
             try:
                 next_obs, env_reward, done, info = env.step(minerl_action)
@@ -232,15 +234,15 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             # 5) KL regularization with the pretrained policy
             #    we do a forward pass on 'obs' for the pretrained policy distribution
             #    so we can measure distance.  We'll do the same "env_obs_to_agent" logic.
-            with th.no_grad():
-                obs_for_pretrained = agent._env_obs_to_agent(obs)
-                obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+#            with th.no_grad():
+            obs_for_pretrained = agent._env_obs_to_agent(obs)
+            obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
 
-                (old_pi_dist, _, _), _ = pretrained_policy.policy(
+            (old_pi_dist, _, _), _ = pretrained_policy.policy(
                     obs=obs_for_pretrained,
                     state_in=pretrained_policy.policy.initial_state(1),
                     first=th.tensor([[False]], dtype=th.bool, device="cuda")
-                )
+            )
 
             loss_kl = compute_kl_loss(pi_dist, old_pi_dist)
             total_loss = loss_rl + LAMBDA_KL * loss_kl
