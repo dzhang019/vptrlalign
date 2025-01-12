@@ -100,16 +100,16 @@ def validate_env(env):
 
 def resize_image(img, target_resolution):
     # For your sanity, do not resize with any function than INTER_LINEAR
-    if isinstance(img, th.Tensor):
-        # Move tensor to CPU and convert to NumPy
-        img = img.cpu().numpy()
+    # if isinstance(img, th.Tensor):
+    #     # Move tensor to CPU and convert to NumPy
+    #     img = img.cpu().numpy()
 
-    while len(img.shape) > 3:
-        img = img.squeeze(0)
+    # while len(img.shape) > 3:
+    #     img = img.squeeze(0)
         
-    if not isinstance(img, np.ndarray):
-        raise ValueError(f"Expected NumPy array or PyTorch tensor, got {type(img)}.")
-    print(f"Input image shape to resize_image: {img.shape}")
+    # if not isinstance(img, np.ndarray):
+    #     raise ValueError(f"Expected NumPy array or PyTorch tensor, got {type(img)}.")
+    # print(f"Input image shape to resize_image: {img.shape}")
 
     img = cv2.resize(img, target_resolution, interpolation=cv2.INTER_LINEAR)
     return img
