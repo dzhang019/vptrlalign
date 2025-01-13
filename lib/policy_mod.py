@@ -24,8 +24,8 @@ def compute_kl_loss(current_logits_dict, old_logits_dict):
     for key in current_logits_dict.keys():
         current_logits = current_logits_dict[key]
         pretrained_logits = old_logits_dict[key]
-        print(f"compute_kl_loss: current_logits_dict[{key}].requires_grad: {current_logits.requires_grad}")
-        print(f"compute_kl_loss: old_logits_dict[{key}].requires_grad: {pretrained_logits.requires_grad}")
+        #print(f"compute_kl_loss: current_logits_dict[{key}].requires_grad: {current_logits.requires_grad}")
+        #print(f"compute_kl_loss: old_logits_dict[{key}].requires_grad: {pretrained_logits.requires_grad}")
         kl_loss = F.kl_div(
             F.log_softmax(current_logits, dim=-1),
             F.softmax(pretrained_logits, dim=-1),
@@ -54,7 +54,7 @@ class ImgPreprocessing(nn.Module):
             self.ob_scale = 255.0 if scale_img else 1.0
 
     def forward(self, img):
-        print(f"Shape before IMPALA CNN: {img.shape}")
+        #print(f"Shape before IMPALA CNN: {img.shape}")
         x = img.to(dtype=th.float32)
         if self.img_mean is not None:
             x = (x - self.img_mean) / self.img_std
@@ -214,15 +214,15 @@ class MinecraftPolicy(nn.Module):
         first = context["first"]
 
         x = self.img_preprocess(ob["img"])
-        print(f"Shape after img_preprocess: {x.shape}")
+        #print(f"Shape after img_preprocess: {x.shape}")
 
         while x.ndim > 5:
             x = x.squeeze(0)
-        print(f"Shape after fixing dimensions in MinecraftPolicy: {x.shape}")
+        #print(f"Shape after fixing dimensions in MinecraftPolicy: {x.shape}")
 
 
         x = self.img_process(x)
-        print(f"Shape after img_process: {x.shape}")
+        #print(f"Shape after img_process: {x.shape}")
 
         if self.diff_obs_process:
             processed_obs = self.diff_obs_process(ob["diff_goal"])
@@ -233,7 +233,7 @@ class MinecraftPolicy(nn.Module):
 
         if self.recurrent_layer is not None:
 
-            print("Inside MinecraftPolicy.forward, first.shape =", first.shape)
+            #print("Inside MinecraftPolicy.forward, first.shape =", first.shape)
             x, state_out = self.recurrent_layer(x, first, state_in)
         else:
             state_out = state_in

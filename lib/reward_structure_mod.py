@@ -12,7 +12,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
     Returns:
         Tuple containing the computed reward and updated visited_chunks.
     """
-    print("Observation keys:", obs.keys())
+    #print("Observation keys:", obs.keys())
 
     # Initialize reward
     reward = 0
