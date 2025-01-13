@@ -15,11 +15,15 @@ pip install --upgrade pip
 echo "Installing minerl from GitHub..."
 pip install git+https://github.com/minerllabs/minerl
 
+#install torch
+echo "Installing PyTorch..."
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
 # Check if requirements.txt exists and install dependencies
 REQUIREMENTS_FILE="requirements.txt"
 if [ -f "$REQUIREMENTS_FILE" ]; then
     echo "Installing dependencies from $REQUIREMENTS_FILE..."
-    pip install --index-url https://download.pytorch.org/whl/cu124 -r $REQUIREMENTS_FILE
+    pip install -r $REQUIREMENTS_FILE
 else
     echo "No $REQUIREMENTS_FILE found. Skipping dependency installation."
 fi
