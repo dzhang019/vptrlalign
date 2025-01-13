@@ -210,6 +210,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             #        tracks hidden_state internally, we might not need it here.
             minerl_action, pi_dist, v_pred, log_prob, new_hidden_state = \
                 agent.get_action_and_training_info(obs, stochastic=True)
+            
             print("train_rl: log_prob.requires_grad rights after .get_action_and_training_info", log_prob.requires_grad)
             # 2) Step the environment with 'minerl_action'
             try:
@@ -227,29 +228,36 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
             # 4) Single-step advantage (still naive)
             #    advantage = reward - V(s), but you might want a next-state bootstrap, etc.
-            v_pred_val = v_pred.item() if hasattr(v_pred, 'item') else v_pred
+            v_pred_val = v_pred.detach() 
+            #if hasattr(v_pred, 'item') else v_pred
             advantage = reward - v_pred_val
             loss_rl = -advantage * log_prob
 
             # 5) KL regularization with the pretrained policy
             #    we do a forward pass on 'obs' for the pretrained policy distribution
             #    so we can measure distance.  We'll do the same "env_obs_to_agent" logic.
-#            with th.no_grad():
-            obs_for_pretrained = agent._env_obs_to_agent(obs)
-            obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
-
-            (old_pi_dist, _, _), _ = pretrained_policy.policy(
+            with th.no_grad():
+                obs_for_pretrained = agent._env_obs_to_agent(obs)
+                obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+                (old_pi_dist, _, _), _ = pretrained_policy.policy(
                     obs=obs_for_pretrained,
                     state_in=pretrained_policy.policy.initial_state(1),
                     first=th.tensor([[False]], dtype=th.bool, device="cuda")
-            )
-
+                    )
+        
+                for key, value  in pi_dist.items():
+                    if isinstance(value, th.Tensor):
+                        print(f"pi_dist[{key}].requires_grad:", value.requires_grad)
+                for key, value in old_pi_dist.items():
+                    if isinstance(value, th.Tensor):
+                        print(f"old_pi_dist[{key}].requires_grad:", value.requires_grad)
+            old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
             loss_kl = compute_kl_loss(pi_dist, old_pi_dist)
             total_loss = loss_rl + LAMBDA_KL * loss_kl
 
             # 6) Backprop and update
             optimizer.zero_grad()
-            total_loss.backward()
+            total_loss.backward(retain_graph=True)
             th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 

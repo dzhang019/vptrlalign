@@ -8,7 +8,7 @@ from lib.action_mapping import CameraHierarchicalMapping
 from lib.actions import ActionTransformer
 from lib.policy_mod import MinecraftAgentPolicy
 from lib.torch_util import default_device_type, set_default_torch_device
-
+from lib.tree_util import tree_map
 print(f"GPU detected: {th.cuda.is_available()}")
 
 # Hardcoded settings
@@ -242,7 +242,8 @@ class MineRLAgent:
         minerl_action = self._agent_action_to_env(agent_action)
 
         # 4) Update the agent's hidden state internally (same as get_action does)
-        self.hidden_state = new_hidden_state
+        self.hidden_state = tree_map(lambda x : x.detach(), new_hidden_state)
+
 
         # 5) Extract extras from 'result':
         #    By default, result["log_prob"] and result["vpred"] are 1D (batch_size=1).

@@ -24,6 +24,8 @@ def compute_kl_loss(current_logits_dict, old_logits_dict):
     for key in current_logits_dict.keys():
         current_logits = current_logits_dict[key]
         pretrained_logits = old_logits_dict[key]
+        print(f"compute_kl_loss: current_logits_dict[{key}].requires_grad: {current_logits.requires_grad}")
+        print(f"compute_kl_loss: old_logits_dict[{key}].requires_grad: {pretrained_logits.requires_grad}")
         kl_loss = F.kl_div(
             F.log_softmax(current_logits, dim=-1),
             F.softmax(pretrained_logits, dim=-1),
