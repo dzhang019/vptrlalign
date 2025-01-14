@@ -140,7 +140,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             minerl_action, pi_dist, v_pred, log_prob, new_hidden_state = \
                 agent.get_action_and_training_info(obs, stochastic=True)
             
-            print("train_rl: log_prob.requires_grad rights after .get_action_and_training_info", log_prob.requires_grad)
+            #print("train_rl: log_prob.requires_grad rights after .get_action_and_training_info", log_prob.requires_grad)
             # 2) Step the environment with 'minerl_action'
             try:
                 next_obs, env_reward, done, info = env.step(minerl_action)
@@ -174,12 +174,12 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
                     first=th.tensor([[False]], dtype=th.bool, device="cuda")
                     )
         
-                for key, value  in pi_dist.items():
-                    if isinstance(value, th.Tensor):
-                        print(f"pi_dist[{key}].requires_grad:", value.requires_grad)
-                for key, value in old_pi_dist.items():
-                    if isinstance(value, th.Tensor):
-                        print(f"old_pi_dist[{key}].requires_grad:", value.requires_grad)
+                # for key, value  in pi_dist.items():
+                #     if isinstance(value, th.Tensor):
+                #         print(f"pi_dist[{key}].requires_grad:", value.requires_grad)
+                # for key, value in old_pi_dist.items():
+                #     if isinstance(value, th.Tensor):
+                #         print(f"old_pi_dist[{key}].requires_grad:", value.requires_grad)
             old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
             loss_kl = compute_kl_loss(pi_dist, old_pi_dist)
             total_loss = loss_rl + LAMBDA_KL * loss_kl

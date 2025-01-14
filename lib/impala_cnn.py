@@ -185,14 +185,11 @@ class ImpalaCNN(nn.Module):
         self.outsize = outsize
 
     def forward(self, x):
-        print(f"Input shape to IMPALA CNN: {x.shape}")
         b, t = x.shape[:-3]
         x = x.reshape(b * t, *x.shape[-3:])
         x = misc.transpose(x, "bhwc", "bchw")
         x = tu.sequential(self.stacks, x, diag_name=self.name)
         x = x.reshape(b, t, *x.shape[1:])
         x = tu.flatten_image(x)
-        print(f"Shape before dense: {x.shape}")
         x = self.dense(x)
-        print(f"Shape after dense: {x.shape}")
         return x
