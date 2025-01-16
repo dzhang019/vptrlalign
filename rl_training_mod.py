@@ -87,7 +87,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     LEARNING_RATE = 0
     #1e-5
     MAX_GRAD_NORM = 1.0      # For gradient clipping
-    LAMBDA_KL = 0.1          # KL regularization weight
+    LAMBDA_KL = 1.0          # KL regularization weight
 
     env = HumanSurvival(**ENV_KWARGS).make()
 
@@ -126,7 +126,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
         # For example:
         # agent.hidden_state = agent.policy.initial_state(batch_size=1)
 
-        while not done:
+        while True:
             env.render()
 
             # 1) SINGLE FORWARD PASS with new method:
@@ -150,7 +150,8 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             except Exception as e:
                 print(f"Error during env.step(): {e}")
                 break
-
+            if done:
+                break
             # 3) Compute your custom reward
             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
             cumulative_reward += reward
@@ -186,7 +187,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
 
             # 6) Backprop and update
             optimizer.zero_grad()
-            total_loss.backward(retain_graph=True)
+            total_loss.backward()
             th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 
