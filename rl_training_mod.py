@@ -81,7 +81,7 @@ def load_model_parameters(path_to_model_file):
     pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
-
+'''
 def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     # Example hyperparameters
     LEARNING_RATE = 0
@@ -205,6 +205,114 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
 
+'''
+def train_rl(in_model, in_weights, out_weights, num_episodes=10):
+    # Example hyperparameters
+    LEARNING_RATE = 1e-5
+    MAX_GRAD_NORM = 1.0      # For gradient clipping
+    LAMBDA_KL = 1.0          # KL regularization weight
+    BATCH_SIZE = 40          # Number of steps per batch
+
+    env = HumanSurvival(**ENV_KWARGS).make()
+
+    # Load parameters for both current agent and pretrained agent
+    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
+    agent = MineRLAgent(
+        env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    agent.load_weights(in_weights)
+
+    pretrained_policy = MineRLAgent(
+        env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    pretrained_policy.load_weights(in_weights)
+
+    for agent_param, pretrained_param in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
+        assert not (agent_param.data_ptr() == pretrained_param.data_ptr()), "Weights are shared!"
+
+    # Optimizer
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
+
+    for episode in range(num_episodes):
+        print(f"Starting episode {episode}")
+        obs = env.reset()
+        done = False
+        cumulative_reward = 0.0
+        visited_chunks = set()
+        trajectories = []  # Collect data for batch updates
+
+        while not done:
+            env.render()
+
+            # Forward pass
+            minerl_action, pi_dist, v_pred, log_prob, new_hidden_state = \
+                agent.get_action_and_training_info(obs, stochastic=True)
+
+            # Environment step
+            try:
+                next_obs, env_reward, done, info = env.step(minerl_action)
+                if 'error' in info:
+                    print(f"Error in info: {info['error']}. Ending episode.")
+                    break
+            except Exception as e:
+                print(f"Error during env.step(): {e}")
+                break
+
+            # Compute custom reward
+            reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
+            cumulative_reward += reward
+
+            # Store trajectory data
+            trajectories.append((obs, minerl_action, reward, v_pred, log_prob, pi_dist))
+            obs = next_obs
+
+        print(f"Episode {episode} finished. Cumulative reward = {cumulative_reward}")
+
+        # Process trajectories in batches
+        for i in range(0, len(trajectories), BATCH_SIZE):
+            batch = trajectories[i:i + BATCH_SIZE]
+
+            # Extract batch data
+            obs_batch, action_batch, reward_batch, v_pred_batch, log_prob_batch, pi_dist_batch = zip(*batch)
+
+            # Convert to tensors
+            obs_tensor = th.stack([th.tensor(obs, dtype=th.float32) for obs in obs_batch]).to("cuda")
+            reward_tensor = th.tensor(reward_batch, dtype=th.float32).to("cuda")
+            log_prob_tensor = th.stack(log_prob_batch).to("cuda")
+
+            # Compute advantage
+            v_pred_tensor = th.stack(v_pred_batch).detach()
+            advantage = reward_tensor - v_pred_tensor
+            loss_rl = -(advantage * log_prob_tensor).mean()
+
+            # Compute KL loss
+            with th.no_grad():
+                obs_for_pretrained = agent._env_obs_to_agent(obs_tensor)
+                obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+                (old_pi_dist, _, _), _ = pretrained_policy.policy(
+                    obs=obs_for_pretrained,
+                    state_in=pretrained_policy.policy.initial_state(len(obs_batch)),
+                    first=th.tensor([[False]] * len(obs_batch), dtype=th.bool, device="cuda")
+                )
+            old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
+            loss_kl = compute_kl_loss(pi_dist_batch, old_pi_dist)
+
+            # Combine losses
+            total_loss = loss_rl + LAMBDA_KL * loss_kl
+
+            # Backprop and update
+            optimizer.zero_grad()
+            total_loss.backward()
+            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+            optimizer.step()
+
+    # Save fine-tuned weights
+    print(f"Saving fine-tuned weights to {out_weights}")
+    th.save(agent.policy.state_dict(), out_weights)
 
 
 
