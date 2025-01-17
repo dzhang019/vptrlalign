@@ -326,7 +326,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     th.save(agent.policy.state_dict(), out_weights)
 '''
 
-def train_rl(in_model, in_weights, out_weights, num_episodes=10):
+'''def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     # Example hyperparameters
     LEARNING_RATE = 1e-5
     MAX_GRAD_NORM = 1.0      # For gradient clipping
@@ -411,6 +411,193 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             batched_trajectories.clear()  # Clear batched trajectories after processing
 
     # Save fine-tuned weights
+    print(f"Saving fine-tuned weights to {out_weights}")
+    th.save(agent.policy.state_dict(), out_weights)
+'''
+import torch as th
+from torch import nn
+from torch.nn import functional as F
+import numpy as np
+
+def train_rl(in_model, in_weights, out_weights, num_episodes=10):
+    """
+    This version performs exactly one update per episode:
+      - The agent acts step-by-step, storing data in an episode buffer.
+      - No parameter updates happen during the episode (so no mismatch of old vs. new policy).
+      - At the end of the episode, we do one gradient update using all transitions at once.
+    """
+
+    # Example hyperparameters
+    LEARNING_RATE = 1e-5
+    MAX_GRAD_NORM = 1.0      # For gradient clipping
+    LAMBDA_KL = 1.0          # KL regularization weight
+
+    env = HumanSurvival(**ENV_KWARGS).make()
+
+    # Load parameters for both current agent and pretrained agent
+    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
+    agent = MineRLAgent(
+        env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    agent.load_weights(in_weights)
+
+    pretrained_policy = MineRLAgent(
+        env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    pretrained_policy.load_weights(in_weights)
+
+    # Sanity check: ensure the policies do not share parameters
+    for agent_param, pretrained_param in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
+        assert agent_param.data_ptr() != pretrained_param.data_ptr(), "Weights are shared!"
+
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
+
+    # Tracking stats
+    running_loss = 0.0
+    total_steps = 0
+
+    for episode_idx in range(num_episodes):
+        print(f"Starting episode {episode_idx}")
+
+        obs = env.reset()
+        done = False
+        visited_chunks = set()
+        cumulative_reward = 0.0
+
+        # Store transitions for one entire episode:
+        # Each step: (obs, reward, v_pred, log_prob, pi_dist, old_pi_dist)
+        episode_trajectory = []
+
+        # Optionally, if your agent or environment uses recurrent states, you might
+        # want to reset them here, e.g.:
+        # agent.reset_rnn_states()
+        # pretrained_policy.reset_rnn_states()  # if needed
+
+        while not done:
+            env.render()
+
+            # =========================================================
+            # 1) Single forward pass on *current agent*.
+            # =========================================================
+            #    'get_action_and_training_info' typically returns:
+            #      - minerl_action: The environment action (dict or array).
+            #      - pi_dist: Distribution object (or dict of Tensors) for the current policy.
+            #      - v_pred: Value estimate from the current policy.
+            #      - log_prob: Log-probability of the chosen action.
+            #      - new_hidden_state: If your agent is recurrent, the new hidden state for next step.
+            minerl_action, pi_dist_curr, v_pred, log_prob, new_hidden_state = \
+                agent.get_action_and_training_info(obs, stochastic=True)
+
+            # =========================================================
+            # 2) Compute the *pretrained policy* distribution for KL
+            # =========================================================
+            # We do it step-by-step *during* the episode so that
+            # we don't have to re-run it afterwards in a big batch
+            # (which can cause hidden-state mismatches).
+            with th.no_grad():
+                # Convert observation to the same format used by the policies
+                obs_for_pretrained = agent._env_obs_to_agent(obs)
+                # Add time dimension if needed:
+                obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+
+                # pretrained_policy forward pass
+                (old_pi_dist, _, _), _ = pretrained_policy.policy(
+                    obs=obs_for_pretrained,
+                    state_in=pretrained_policy.policy.initial_state(1),
+                    first=th.tensor([[False]], dtype=th.bool, device="cuda")
+                )
+
+            # Detach any Tensors in old_pi_dist so we don't build large graphs
+            old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
+
+            # =========================================================
+            # 3) Step the environment
+            # =========================================================
+            try:
+                next_obs, env_reward, done, info = env.step(minerl_action)
+                if 'error' in info:
+                    print(f"Error in info: {info['error']}. Ending episode.")
+                    break
+            except Exception as e:
+                print(f"Error during env.step(): {e}")
+                break
+
+            # We might be done now, but let's still record this transition if you want the final step.
+            # Usually there's no "next state" advantage if done, so you can break if done right away.
+
+            # =========================================================
+            # 4) Compute your custom reward (and accumulate)
+            # =========================================================
+            # Because the environment's 'env_reward' might not be the one you want.
+            reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
+            cumulative_reward += reward
+
+            # =========================================================
+            # 5) Store in the episode buffer
+            # =========================================================
+            # We detach these Tensors so we don't store a massive graph:
+            transition = {
+                'obs': obs,
+                'reward': reward,
+                'v_pred': v_pred.detach(),
+                'log_prob': log_prob.detach(),
+                'pi_dist': tree_map(lambda x: x.detach() if isinstance(x, th.Tensor) else x, pi_dist_curr),
+                'old_pi_dist': old_pi_dist  # pretrained distribution
+            }
+            episode_trajectory.append(transition)
+
+            # Move to next step
+            obs = next_obs
+
+        print(f"Episode {episode_idx} finished. Cumulative reward = {cumulative_reward:.2f}")
+
+        # =========================================================
+        # 6) After the episode ends, do ONE gradient update
+        # =========================================================
+        # This is where we sum (or average) losses over all transitions in the episode.
+        if len(episode_trajectory) > 0:
+            optimizer.zero_grad()
+
+            episode_loss = 0.0
+            for step_data in episode_trajectory:
+                # Advantage = (reward - v_pred)
+                # You might want discounting or GAE for a longer horizon, but we keep it naive here.
+                advantage = step_data['reward'] - step_data['v_pred']
+
+                # RL Loss: - advantage * log_prob
+                loss_rl = -(advantage * step_data['log_prob'])
+
+                # KL with the pretrained policy
+                # pi_dist (agent) vs old_pi_dist (pretrained)
+                pi_dist_agent = step_data['pi_dist']
+                pi_dist_old = step_data['old_pi_dist']
+                loss_kl = compute_kl_loss(pi_dist_agent, pi_dist_old)
+
+                # Combine losses
+                total_loss_step = loss_rl + (LAMBDA_KL * loss_kl)
+                episode_loss += total_loss_step
+
+            # Average or sum over the entire episode
+            episode_loss = episode_loss / len(episode_trajectory)
+
+            episode_loss.backward()
+            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+            optimizer.step()
+
+            loss_val = episode_loss.item()
+            running_loss += loss_val * len(episode_trajectory)
+            total_steps += len(episode_trajectory)
+
+            avg_loss = running_loss / total_steps
+            print(f"  [Update] Episode Loss={loss_val:.4f}, Steps so far={total_steps}, Avg Loss={avg_loss:.4f}")
+
+    # =========================================================
+    # 7) Finally, save the agent's updated weights
+    # =========================================================
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
 
