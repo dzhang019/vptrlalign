@@ -265,10 +265,20 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             # Compute custom reward
             reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
             cumulative_reward += reward
-
+            v_pred = v_pred.detach()
+            log_prob = log_prob.detach()
             # Store trajectory data
-            trajectories.append((obs, minerl_action, reward, v_pred, log_prob, pi_dist))
+            trajectories.append((
+                obs, 
+                minerl_action, 
+                reward, 
+                v_pred.detach(), 
+                log_prob.detach(), 
+                {k: v.detach() for k,v in pi_dist.items() if isinstance(v, th.Tensor)}
+            ))
             obs = next_obs
+            print(f"Allocated: {th.cuda.memory_allocated() / 1e9:.2f} GB")
+            print(f"Reserved: {th.cuda.memory_reserved() / 1e9:.2f} GB")
 
         print(f"Episode {episode} finished. Cumulative reward = {cumulative_reward}")
 
@@ -285,7 +295,7 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
             log_prob_tensor = th.stack(log_prob_batch).to("cuda")
 
             # Compute advantage
-            v_pred_tensor = th.stack(v_pred_batch).detach()
+            v_pred_tensor = th.stack(v_pred_batch)
             advantage = reward_tensor - v_pred_tensor
             loss_rl = -(advantage * log_prob_tensor).mean()
 
