@@ -77,19 +77,35 @@ def compute_gae(transitions, agent, gamma=0.999, lam=0.95):
     return transitions
 
 
-def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps=40):
+def train_rl(
+    in_model, 
+    in_weights, 
+    out_weights, 
+    out_episodes,
+    num_iterations=10, 
+    rollout_steps=40
+):
     """
     Partial-rollout training with GAE + Value Loss + KL regularization.
+    Also logs the number of steps survived per episode to `out_episodes` file.
+
+    Args:
+      in_model: Path to the .model file (model configuration)
+      in_weights: Path to the pretrained .weights
+      out_weights: Where to save the fine-tuned .weights
+      out_episodes: Path to text file where we log the # of steps each episode lasted
+      num_iterations: How many partial-rollout iterations
+      rollout_steps: How many steps to collect per partial rollout
     """
 
     # Hyperparameters
     LEARNING_RATE = 1e-5
-    MAX_GRAD_NORM = 1.0             # For gradient clipping
-    LAMBDA_KL = 1.0                 # KL regularization weight
-    GAMMA = 0.999                   # discount factor
-    LAM = 0.95                      # GAE lambda
-    DEATH_PENALTY = -100.0          # additional penalty if done=True from death
-    VALUE_LOSS_COEF = 0.5           # scale factor on value loss
+    MAX_GRAD_NORM = 1.0      # For gradient clipping
+    LAMBDA_KL = 1.0          # KL regularization weight
+    GAMMA = 0.999            # discount factor
+    LAM = 0.95               # GAE lambda
+    DEATH_PENALTY = -100.0   # additional penalty if done=True from death
+    VALUE_LOSS_COEF = 0.5    # scale factor on value loss
 
     env = HumanSurvival(**ENV_KWARGS).make()
 
@@ -123,6 +139,10 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
     obs = env.reset()
     visited_chunks = set()
 
+    # For logging the length of each spawn-to-death
+    # We'll keep a step counter that increments each environment step.
+    episode_step_count = 0
+
     # 3) Outer loop: do N partial-rollout iterations
     for iteration in range(num_iterations):
         print(f"Starting partial-rollout iteration {iteration}")
@@ -134,6 +154,7 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
 
         while step_count < rollout_steps and not done:
             env.render()
+            episode_step_count += 1  # increment for each environment step
 
             # --- A) Get action & training info from current agent ---
             minerl_action, pi_dist, v_pred, log_prob, new_hidden_state = \
@@ -162,8 +183,6 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
 
             # If 'done' due to death (or forced end), apply penalty
             if done:
-                # You might customize whether it's actually "death" or some error
-                # For simplicity, assume done = death => negative penalty
                 env_reward += DEATH_PENALTY
 
             # --- D) Compute custom reward & accumulate ---
@@ -191,7 +210,13 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
               f"CumulativeReward={cumulative_reward}")
 
         if done:
-            # If the episode ended, reset for the next iteration
+            # The agent died (or episode ended). 
+            # => Log the length of the episode to the text file
+            with open(out_episodes, "a") as f:
+                f.write(f"{episode_step_count}\n")
+
+            # Reset for the next episode
+            episode_step_count = 0
             obs = env.reset()
             visited_chunks.clear()
 
@@ -207,9 +232,9 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
         total_loss_for_rollout = th.tensor(0.0, device="cuda")
 
         for step_data in transitions:
-            advantage = step_data["advantage"]            # (float)
-            returns_ = step_data["return"]                # (float)
-            log_prob = step_data["log_prob"]              # (tensor)
+            advantage = step_data["advantage"]     # (float)
+            returns_ = step_data["return"]         # (float)
+            log_prob = step_data["log_prob"]       # (tensor)
             pi_dist_current = step_data["pi_dist"]
             pi_dist_pretrained = step_data["old_pi_dist"]
 
@@ -217,9 +242,7 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
             loss_rl = -(advantage * log_prob)
 
             # Value loss: (V - returns)^2
-            # If we want to update the value function, do NOT detach step_data["v_pred"]
-            # from the rollout. So let's do:
-            v_pred_ = step_data["v_pred"]  # the raw tensor from environment step
+            v_pred_ = step_data["v_pred"]  
             value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
 
             # KL regularization
@@ -257,6 +280,8 @@ if __name__ == "__main__":
     parser.add_argument("--in-model", required=True, type=str, help="Path to the .model file to be fine-tuned")
     parser.add_argument("--in-weights", required=True, type=str, help="Path to the .weights file to be fine-tuned")
     parser.add_argument("--out-weights", required=True, type=str, help="Path where fine-tuned weights will be saved")
+    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt",
+                        help="Path to text file for logging #steps each episode survived.")
     parser.add_argument("--num-iterations", required=False, type=int, default=10,
                         help="Number of partial-rollout iterations")
     parser.add_argument("--rollout-steps", required=False, type=int, default=40,
@@ -268,6 +293,7 @@ if __name__ == "__main__":
         in_model=args.in_model,
         in_weights=args.in_weights,
         out_weights=args.out_weights,
+        out_episodes=args.out_episodes,
         num_iterations=args.num_iterations,
         rollout_steps=args.rollout_steps
     )
