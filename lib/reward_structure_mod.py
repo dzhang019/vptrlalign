@@ -24,9 +24,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
         life_stats = obs["life_stats"]
         if life_stats.get("life", 20) < 10:  # Assuming 20 is max health
             reward -= 10  # Penalty for low health
-        if not life_stats.get("is_alive", True):
-            reward -= 1000  # Large penalty for death
-
+            print("low heath")
     # Exploration reward: New chunks
     xpos, ypos, zpos = 0, 0, 0
     if "location_stats" in obs:
