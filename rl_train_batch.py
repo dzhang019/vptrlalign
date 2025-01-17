@@ -1,3 +1,29 @@
+from argparse import ArgumentParser
+import pickle
+import time
+
+import gym
+import minerl
+import torch as th
+import numpy as np
+
+from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
+from data_loader import DataLoader
+from lib.tree_util import tree_map
+
+from lib.reward_structure_mod import custom_reward_function
+from lib.policy_mod import compute_kl_loss
+from torchvision import transforms
+from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+
+
+def load_model_parameters(path_to_model_file):
+    agent_parameters = pickle.load(open(path_to_model_file, "rb"))
+    policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
+    pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
+    pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
+    return policy_kwargs, pi_head_kwargs
+
 def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps=40):
     """
     This version collects `rollout_steps` transitions, then does a single gradient update
@@ -156,3 +182,18 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
     # 4) After all iterations, save fine-tuned weights
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--in-model", required=True, type=str, help="Path to the .model file to be fine-tuned")
+    parser.add_argument("--in-weights", required=True, type=str, help="Path to the .weights file to be fine-tuned")
+    parser.add_argument("--out-weights", required=True, type=str, help="Path where fine-tuned weights will be saved")
+    parser.add_argument("--num-episodes", required=False, type=int, default=10, help="Number of training episodes")
+
+    args = parser.parse_args()
+
+    train_rl(
+        in_model=args.in_model,
+        in_weights=args.in_weights,
+        out_weights=args.out_weights
+    )
