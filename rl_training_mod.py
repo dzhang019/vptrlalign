@@ -414,42 +414,85 @@ def train_rl(in_model, in_weights, out_weights, num_episodes=10):
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
 
+# def process_batched_episodes(batched_trajectories, agent, pretrained_policy, optimizer, LAMBDA_KL, MAX_GRAD_NORM):
+#     # Process each episode in the batch
+#     for episode_trajectory in batched_trajectories:
+#         # Extract trajectory data for the episode
+#         obs_batch, action_batch, reward_batch, v_pred_batch, log_prob_batch, pi_dist_batch = zip(*episode_trajectory)
+
+#         # Convert to tensors
+#         obs_tensor = th.stack([th.tensor(obs, dtype=th.float32) for obs in obs_batch]).to("cuda")
+#         reward_tensor = th.tensor(reward_batch, dtype=th.float32).to("cuda")
+#         log_prob_tensor = th.stack(log_prob_batch).to("cuda")
+#         v_pred_tensor = th.stack(v_pred_batch)
+
+#         # Compute advantage
+#         advantage = reward_tensor - v_pred_tensor
+#         loss_rl = -(advantage * log_prob_tensor).mean()
+
+#         # Compute KL loss
+#         with th.no_grad():
+#             obs_for_pretrained = agent._env_obs_to_agent(obs_tensor)
+#             obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+#             (old_pi_dist, _, _), _ = pretrained_policy.policy(
+#                 obs=obs_for_pretrained,
+#                 state_in=pretrained_policy.policy.initial_state(len(obs_batch)),
+#                 first=th.tensor([[False]] * len(obs_batch), dtype=th.bool, device="cuda")
+#             )
+#         old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
+#         loss_kl = compute_kl_loss(pi_dist_batch, old_pi_dist)
+
+#         # Combine losses
+#         total_loss = loss_rl + LAMBDA_KL * loss_kl
+
+#         # Backprop and update
+#         optimizer.zero_grad()
+#         total_loss.backward()
+#         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+#         optimizer.step()
 def process_batched_episodes(batched_trajectories, agent, pretrained_policy, optimizer, LAMBDA_KL, MAX_GRAD_NORM):
-    # Process each episode in the batch
+    optimizer.zero_grad()  # Clear previous gradients
+
+    total_loss = 0.0  # Accumulate loss over the batch
+
     for episode_trajectory in batched_trajectories:
         # Extract trajectory data for the episode
         obs_batch, action_batch, reward_batch, v_pred_batch, log_prob_batch, pi_dist_batch = zip(*episode_trajectory)
 
-        # Convert to tensors
-        obs_tensor = th.stack([th.tensor(obs, dtype=th.float32) for obs in obs_batch]).to("cuda")
-        reward_tensor = th.tensor(reward_batch, dtype=th.float32).to("cuda")
-        log_prob_tensor = th.stack(log_prob_batch).to("cuda")
-        v_pred_tensor = th.stack(v_pred_batch)
+        # Process each step in the trajectory
+        for step in range(len(obs_batch)):
+            # Extract step data
+            obs = obs_batch[step]
+            reward = reward_batch[step]
+            v_pred = v_pred_batch[step]
+            log_prob = log_prob_batch[step]
+            pi_dist = pi_dist_batch[step]
 
-        # Compute advantage
-        advantage = reward_tensor - v_pred_tensor
-        loss_rl = -(advantage * log_prob_tensor).mean()
+            # Convert observation to agent-compatible format
+            obs_tensor = agent._env_obs_to_agent(obs)
 
-        # Compute KL loss
-        with th.no_grad():
-            obs_for_pretrained = agent._env_obs_to_agent(obs_tensor)
-            obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
-            (old_pi_dist, _, _), _ = pretrained_policy.policy(
-                obs=obs_for_pretrained,
-                state_in=pretrained_policy.policy.initial_state(len(obs_batch)),
-                first=th.tensor([[False]] * len(obs_batch), dtype=th.bool, device="cuda")
-            )
-        old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
-        loss_kl = compute_kl_loss(pi_dist_batch, old_pi_dist)
+            # Compute advantage
+            advantage = reward - v_pred
+            loss_rl = -(advantage * log_prob)
 
-        # Combine losses
-        total_loss = loss_rl + LAMBDA_KL * loss_kl
+            # Compute KL loss with pretrained policy
+            with th.no_grad():
+                obs_for_pretrained = tree_map(lambda x: x.unsqueeze(0), obs_tensor)
+                (old_pi_dist, _, _), _ = pretrained_policy.policy(
+                    obs=obs_for_pretrained,
+                    state_in=pretrained_policy.policy.initial_state(1),
+                    first=th.tensor([[False]], dtype=th.bool, device="cuda")
+                )
+            old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
+            loss_kl = compute_kl_loss(pi_dist, old_pi_dist)
 
-        # Backprop and update
-        optimizer.zero_grad()
-        total_loss.backward()
-        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
-        optimizer.step()
+            # Combine losses
+            total_loss += loss_rl + LAMBDA_KL * loss_kl  # Accumulate loss
+
+    # Perform a single backward pass and optimization step
+    total_loss.backward()
+    th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+    optimizer.step()
 
 
 def behavioural_cloning_train(data_dir, in_model, in_weights, out_weights):
