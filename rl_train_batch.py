@@ -24,23 +24,72 @@ def load_model_parameters(path_to_model_file):
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
 
+
+def compute_gae(transitions, agent, gamma=0.999, lam=0.95):
+    """
+    Compute GAE for a partial rollout.
+    Each item in 'transitions' is a dict with:
+      {
+        "obs": obs_t,
+        "next_obs": obs_{t+1},
+        "reward": r_t,
+        "v_pred": v_t (tensor),
+        "done": bool,
+        "log_prob": log_prob_t (tensor),
+        "pi_dist": ...,
+        "old_pi_dist": ...,
+        ...
+      }
+    We add:
+      transition["advantage"] = ...
+      transition["return"] = ...
+    """
+    # 1) If last step isn't done, bootstrap final value
+    if not transitions[-1]["done"]:
+        with th.no_grad():
+            # Next obs of last transition
+            final_next_obs = transitions[-1]["next_obs"]
+            # Get the value of final_next_obs from agent
+            # We don't need the full distribution here
+            _, _, v_next, _, _ = agent.get_action_and_training_info(final_next_obs, stochastic=False)
+        bootstrap_value = v_next.item()
+    else:
+        bootstrap_value = 0.0
+
+    # 2) GAE calculation
+    gae = 0.0
+    for i in reversed(range(len(transitions))):
+        r_t = transitions[i]["reward"]
+        v_t = transitions[i]["v_pred"].item()
+        done_t = transitions[i]["done"]
+        mask = 1.0 - float(done_t)
+
+        if i == len(transitions) - 1:
+            next_value = bootstrap_value
+        else:
+            next_value = transitions[i+1]["v_pred"].item()
+
+        delta = r_t + gamma * next_value * mask - v_t
+        gae = delta + gamma * lam * mask * gae
+        transitions[i]["advantage"] = gae
+        transitions[i]["return"] = v_t + gae
+
+    return transitions
+
+
 def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps=40):
     """
-    This version collects `rollout_steps` transitions, then does a single gradient update
-    on that entire mini-batch (partial rollout). It reuses the same calls from your single-step code.
-    
-    Args:
-      in_model: path or config for the agent model
-      in_weights: pretrained weights for both agent and pretrained policy
-      out_weights: where to save fine-tuned weights
-      num_iterations: how many times we collect a partial rollout & update
-      rollout_steps: how many steps to collect before each update
+    Partial-rollout training with GAE + Value Loss + KL regularization.
     """
 
-    # Hyperparameters, same as before (adjust as needed)
+    # Hyperparameters
     LEARNING_RATE = 1e-5
-    MAX_GRAD_NORM = 1.0      # For gradient clipping
-    LAMBDA_KL = 1.0          # KL regularization weight
+    MAX_GRAD_NORM = 1.0             # For gradient clipping
+    LAMBDA_KL = 1.0                 # KL regularization weight
+    GAMMA = 0.999                   # discount factor
+    LAM = 0.95                      # GAE lambda
+    DEATH_PENALTY = -100.0          # additional penalty if done=True from death
+    VALUE_LOSS_COEF = 0.5           # scale factor on value loss
 
     env = HumanSurvival(**ENV_KWARGS).make()
 
@@ -78,7 +127,6 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
     for iteration in range(num_iterations):
         print(f"Starting partial-rollout iteration {iteration}")
 
-        # We will store up to `rollout_steps` transitions here
         transitions = []
         step_count = 0
         done = False
@@ -100,10 +148,9 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
                     state_in=pretrained_policy.policy.initial_state(1),
                     first=th.tensor([[False]], dtype=th.bool, device="cuda")
                 )
-            # Detach the pretrained distribution
             old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
 
-            # --- C) Step the environment ---
+            # --- C) Step environment ---
             try:
                 next_obs, env_reward, done, info = env.step(minerl_action)
                 if 'error' in info:
@@ -113,18 +160,28 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
                 print(f"Error during env.step(): {e}")
                 break
 
+            # If 'done' due to death (or forced end), apply penalty
+            if done:
+                # You might customize whether it's actually "death" or some error
+                # For simplicity, assume done = death => negative penalty
+                env_reward += DEATH_PENALTY
+
             # --- D) Compute custom reward & accumulate ---
-            reward, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
+            custom_r, visited_chunks = custom_reward_function(obs, done, info, visited_chunks)
+            reward = env_reward + custom_r  # Combine env reward with custom
             cumulative_reward += reward
 
-            # --- E) Store transition for this partial rollout ---
+            # --- E) Store transition ---
+            # We'll also store 'done' and 'next_obs' for GAE
             transitions.append({
-                "obs": obs,             # raw obs at this step
-                "pi_dist": pi_dist,     # current agent distribution
-                "v_pred": v_pred,       # agent's value estimate
-                "log_prob": log_prob,   # agent's log-prob of chosen action
-                "old_pi_dist": old_pi_dist,  # pretrained policy distribution
-                "reward": reward
+                "obs": obs,
+                "next_obs": next_obs,
+                "pi_dist": pi_dist,
+                "v_pred": v_pred,        # agent's value estimate
+                "log_prob": log_prob,    # agent's log-prob
+                "old_pi_dist": old_pi_dist,
+                "reward": reward,
+                "done": done
             })
 
             obs = next_obs
@@ -133,34 +190,45 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
         print(f"  Collected {len(transitions)} steps this iteration. Done={done}, "
               f"CumulativeReward={cumulative_reward}")
 
-        # If the episode ended, reset for the next iteration
         if done:
+            # If the episode ended, reset for the next iteration
             obs = env.reset()
             visited_chunks.clear()
 
-        # --- F) Now do ONE gradient update for all transitions in `transitions` ---
         if len(transitions) == 0:
             print("  No transitions collected, continuing.")
             continue
 
+        # --- F) Compute GAE for partial rollout ---
+        transitions = compute_gae(transitions, agent, gamma=GAMMA, lam=LAM)
+
+        # --- G) Single gradient update for all transitions ---
         optimizer.zero_grad()
-        total_loss_for_rollout = 0.0
+        total_loss_for_rollout = th.tensor(0.0, device="cuda")
 
-        # The single-step logic is repeated, but now we sum over the partial rollout
         for step_data in transitions:
-            v_pred_val = step_data["v_pred"].detach()
-            advantage = step_data["reward"] - v_pred_val   # naive advantage
+            advantage = step_data["advantage"]            # (float)
+            returns_ = step_data["return"]                # (float)
+            log_prob = step_data["log_prob"]              # (tensor)
+            pi_dist_current = step_data["pi_dist"]
+            pi_dist_pretrained = step_data["old_pi_dist"]
 
-            # RL loss: -(advantage * log_prob)
-            loss_rl = -(advantage * step_data["log_prob"])  
+            # Policy gradient loss: - advantage * log_prob
+            loss_rl = -(advantage * log_prob)
+
+            # Value loss: (V - returns)^2
+            # If we want to update the value function, do NOT detach step_data["v_pred"]
+            # from the rollout. So let's do:
+            v_pred_ = step_data["v_pred"]  # the raw tensor from environment step
+            value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
 
             # KL regularization
-            loss_kl = compute_kl_loss(step_data["pi_dist"], step_data["old_pi_dist"])
+            loss_kl = compute_kl_loss(pi_dist_current, pi_dist_pretrained)
 
-            total_loss_step = loss_rl + LAMBDA_KL * loss_kl
-            total_loss_for_rollout += total_loss_step
+            total_loss_step = loss_rl + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * loss_kl)
+            total_loss_for_rollout += total_loss_step.mean()
 
-        # Average loss over the partial rollout
+        # Average over the partial rollout
         total_loss_for_rollout = total_loss_for_rollout / len(transitions)
 
         # Backprop and update
@@ -183,17 +251,23 @@ def train_rl(in_model, in_weights, out_weights, num_iterations=10, rollout_steps
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
 
+
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--in-model", required=True, type=str, help="Path to the .model file to be fine-tuned")
     parser.add_argument("--in-weights", required=True, type=str, help="Path to the .weights file to be fine-tuned")
     parser.add_argument("--out-weights", required=True, type=str, help="Path where fine-tuned weights will be saved")
-    parser.add_argument("--num-episodes", required=False, type=int, default=10, help="Number of training episodes")
+    parser.add_argument("--num-iterations", required=False, type=int, default=10,
+                        help="Number of partial-rollout iterations")
+    parser.add_argument("--rollout-steps", required=False, type=int, default=40,
+                        help="How many steps per partial rollout")
 
     args = parser.parse_args()
 
     train_rl(
         in_model=args.in_model,
         in_weights=args.in_weights,
-        out_weights=args.out_weights
+        out_weights=args.out_weights,
+        num_iterations=args.num_iterations,
+        rollout_steps=args.rollout_steps
     )
