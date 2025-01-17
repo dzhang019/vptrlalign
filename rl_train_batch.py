@@ -99,14 +99,14 @@ def train_rl(
     """
 
     # Hyperparameters
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 1e-6
     MAX_GRAD_NORM = 1.0      # For gradient clipping
     LAMBDA_KL = 1.0          # KL regularization weight
-    GAMMA = 0.999            # discount factor
+    GAMMA = 0.9999            # discount factor
     LAM = 0.95               # GAE lambda
-    DEATH_PENALTY = -100.0   # additional penalty if done=True from death
+    DEATH_PENALTY = -1000.0   # additional penalty if done=True from death
     VALUE_LOSS_COEF = 0.5    # scale factor on value loss
-
+    KL_DECAY = 0.9995
     env = HumanSurvival(**ENV_KWARGS).make()
 
     # 1) Load parameters for both current agent and pretrained agent
@@ -267,7 +267,7 @@ def train_rl(
             avg_loss = running_loss / total_steps
         else:
             avg_loss = 0.0
-
+        LAMBDA_KL *= KL_DECAY
         print(f"  [Update] Loss={total_loss_val:.4f}, Steps so far={total_steps}, Avg Loss={avg_loss:.4f}")
 
     # 4) After all iterations, save fine-tuned weights
