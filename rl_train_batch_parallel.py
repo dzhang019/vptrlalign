@@ -24,40 +24,19 @@ def load_model_parameters(path_to_model_file):
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
 
+
 def compute_gae(transitions, agent, gamma=0.999, lam=0.95):
     """
-    Same as before, but note that 'transitions' may contain data from multiple envs.
-    Each item is a dict with:
-       {
-         "obs": obs_t,
-         "next_obs": obs_{t+1},
-         "reward": r_t,
-         "v_pred": v_t (tensor),
-         "done": bool,
-         "log_prob": log_prob_t (tensor),
-         "pi_dist": ...,
-         "old_pi_dist": ...,
-         ...
-       }
-    We add:
-       transition["advantage"] = ...
-       transition["return"] = ...
+    Same GAE function. We treat the entire 'transitions' list
+    as if it's one sequence. For 2 envs, we just store them
+    in the order they were collected, then do the naive approach.
+    (For perfect correctness, you'd separate each env's partial
+    trajectory, do GAE individually.)
     """
-    # We'll assume transitions are grouped or flattened but keep the same logic.
-    # One subtlety: if transitions come from multiple envs that ended at different times,
-    # you can't just do a single backward pass for GAE. Instead, you do GAE per environment trajectory.
-    # For simplicity, let's assume they are all short partials in the same "time window".
-    # We'll do a naive approach: treat them as if each is sequential. 
-    # If you want perfect correctness, you'd segment by env index. But let's keep minimal.
-
-    # 1) Sort transitions by 'timestep_index' if needed, or skip if you're collecting them in order.
-    # We'll skip. We'll assume they are appended in the exact stepping order. 
-    # But if you have multiple envs, the last transitions might be from env 3, which doesn't
-    # line up with env 2. For a minimal approach, we do what you had before: a single chain.
-
-    if not transitions:
+    if len(transitions) == 0:
         return transitions
-    # We detect the last is done or not:
+
+    # 1) If the last step isn't done, bootstrap final value
     if not transitions[-1]["done"]:
         with th.no_grad():
             final_next_obs = transitions[-1]["next_obs"]
@@ -66,43 +45,40 @@ def compute_gae(transitions, agent, gamma=0.999, lam=0.95):
     else:
         bootstrap_value = 0.0
 
+    # 2) GAE
     gae = 0.0
     for i in reversed(range(len(transitions))):
         r_t = transitions[i]["reward"]
         v_t = transitions[i]["v_pred"].item()
         done_t = transitions[i]["done"]
         mask = 1.0 - float(done_t)
+
         if i == len(transitions) - 1:
             next_value = bootstrap_value
         else:
-            next_value = transitions[i+1]["v_pred"].item()
+            next_value = transitions[i + 1]["v_pred"].item()
 
         delta = r_t + gamma * next_value * mask - v_t
         gae = delta + gamma * lam * mask * gae
         transitions[i]["advantage"] = gae
         transitions[i]["return"] = v_t + gae
+
     return transitions
 
 
 def train_rl(
-    in_model, 
-    in_weights, 
-    out_weights, 
+    in_model,
+    in_weights,
+    out_weights,
     out_episodes,
-    num_iterations=10, 
-    rollout_steps=40,
-    num_envs=2
+    num_iterations=10,
+    rollout_steps=40
 ):
     """
-    Modified partial-rollout training with GAE + Value Loss + KL regularization,
-    now supporting multiple parallel environments.
-
-    We'll run 'num_envs' envs in lockstep for 'rollout_steps' steps each iteration.
-    Then do one single update on the combined transitions from all envs.
-
-    Args:
-      ...
-      num_envs: how many envs to run in parallel
+    Minimal changes to run exactly TWO parallel environments in lockstep.
+    You still get a partial rollout of 'rollout_steps' steps,
+    but now from 2 envs => up to 2*rollout_steps transitions per iteration.
+    We keep env.render() calls so you can see both windows.
     """
 
     # Hyperparameters
@@ -115,21 +91,18 @@ def train_rl(
     VALUE_LOSS_COEF = 0.5
     KL_DECAY = 0.9995
 
-    # 1) Load parameters for both current agent and pretrained agent
-    #    We create one 'template' env for the agent construction
-    #    (We won't actually step this env. It's only for shape references, etc.)
-    env_template = HumanSurvival(**ENV_KWARGS).make()
-
+    # ===== 1) Initialize agent & pretrained policy (single env for shape references) =====
+    dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     agent = MineRLAgent(
-        env_template, device="cuda",
+        dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
         pi_head_kwargs=agent_pi_head_kwargs
     )
     agent.load_weights(in_weights)
 
     pretrained_policy = MineRLAgent(
-        env_template, device="cuda",
+        dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
         pi_head_kwargs=agent_pi_head_kwargs
     )
@@ -138,183 +111,207 @@ def train_rl(
     for agent_param, pretrained_param in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
         assert agent_param.data_ptr() != pretrained_param.data_ptr(), "Weights are shared!"
 
-    # 2) Create the parallel environments
-    envs = [HumanSurvival(**ENV_KWARGS).make() for _ in range(num_envs)]
-    obs_list = [env.reset() for env in envs]
-    visited_chunks_list = [set() for _ in range(num_envs)]
-    done_list = [False]*num_envs
+    # ===== 2) Create two envs =====
+    env1 = HumanSurvival(**ENV_KWARGS).make()
+    env2 = HumanSurvival(**ENV_KWARGS).make()
 
-    # We'll also keep track of how many steps each env has survived in the current episode
-    episode_step_counts = [0]*num_envs
+    obs1 = env1.reset()
+    obs2 = env2.reset()
+
+    done1 = False
+    done2 = False
+    visited_chunks1 = set()
+    visited_chunks2 = set()
+    episode_step_count1 = 0
+    episode_step_count2 = 0
 
     # 3) Create optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
 
+    # Some stats
     running_loss = 0.0
     total_steps = 0
 
-    # 4) Outer loop over partial-rollout iterations
+    # ===== 4) Outer loop over partial-rollout iterations =====
     for iteration in range(num_iterations):
         print(f"Starting partial-rollout iteration {iteration}")
 
-        # We'll accumulate transitions from *all* envs in one big list
-        transitions_all_envs = []
+        transitions_all = []  # We'll store transitions from both envs
 
         # We'll do 'rollout_steps' steps in lockstep
-        for step_i in range(rollout_steps):
-            # A) Batch forward pass for all envs that are not done
-            #    We build a batch of observations for each env that is still active
-            #    For minimal changes, let's do a loop call to get_action_and_training_info for each env
-            #    Then stack if needed. But that wouldn't be truly batched on GPU. 
-            #    For actual GPU batching, you'd do a single forward pass with stacked obs. 
-            #    We'll keep it minimal with a loop approach.
+        step_count = 0
+        while step_count < rollout_steps:
+            step_count += 1
 
-            minerl_actions = []
-            pi_dists = []
-            v_preds = []
-            log_probs = []
-            # new_hidden_states = []  # if you used them
+            # A) Render each env so you can see both windows
+            env1.render()
+            env2.render()
 
-            for env_i in range(num_envs):
-                if not done_list[env_i]:
-                    # Single-step forward pass
-                    # obs_list[env_i] is the current obs
-                    action, pi_dist, v_pred, log_prob, new_hidden_state = \
-                        agent.get_action_and_training_info(obs_list[env_i], stochastic=True)
-                    minerl_actions.append(action)
-                    pi_dists.append(pi_dist)
-                    v_preds.append(v_pred)
-                    log_probs.append(log_prob)
-                else:
-                    # If env is done, we'll put placeholders (the step won't happen)
-                    minerl_actions.append(None)
-                    pi_dists.append(None)
-                    v_preds.append(None)
-                    log_probs.append(None)
+            # B) For env1 if not done => forward pass => step => store transition
+            if not done1:
+                episode_step_count1 += 1
 
-            # B) For each env, step it if not done
-            for env_i in range(num_envs):
-                if done_list[env_i]:
-                    continue  # skip stepping
-                episode_step_counts[env_i] += 1
+                # get agent's action
+                minerl_action1, pi_dist1, v_pred1, log_prob1, _ = \
+                    agent.get_action_and_training_info(obs1, stochastic=True)
 
-                # Get pretrained policy distribution for KL
+                # get pretrained policy dist for KL
                 with th.no_grad():
-                    obs_for_pretrained = agent._env_obs_to_agent(obs_list[env_i])
-                    obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
-                    (old_pi_dist, _, _), _ = pretrained_policy.policy(
-                        obs=obs_for_pretrained,
+                    obs_for_pretrained1 = agent._env_obs_to_agent(obs1)
+                    obs_for_pretrained1 = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained1)
+                    (old_pi_dist1, _, _), _ = pretrained_policy.policy(
+                        obs=obs_for_pretrained1,
                         state_in=pretrained_policy.policy.initial_state(1),
                         first=th.tensor([[False]], dtype=th.bool, device="cuda")
                     )
-                old_pi_dist = tree_map(lambda x: x.detach(), old_pi_dist)
+                old_pi_dist1 = tree_map(lambda x: x.detach(), old_pi_dist1)
 
                 try:
-                    next_obs, env_reward, done_flag, info = envs[env_i].step(minerl_actions[env_i])
-                    if 'error' in info:
-                        print(f"[Env {env_i}] Error in info: {info['error']}. Ending episode.")
-                        done_flag = True
+                    next_obs1, env_reward1, done1_flag, info1 = env1.step(minerl_action1)
                 except Exception as e:
-                    print(f"[Env {env_i}] Error during env.step(): {e}")
-                    done_flag = True
+                    print(f"Env1 step error: {e}")
+                    done1_flag = True
+                    env_reward1 = 0
+                    info1 = {}
 
-                if done_flag:
-                    env_reward += DEATH_PENALTY
+                if 'error' in info1:
+                    print(f"[Env1] Error in info: {info1['error']}. Ending episode.")
+                    done1_flag = True
 
-                # D) custom reward
-                custom_r, visited_chunks_list[env_i] = custom_reward_function(
-                    obs_list[env_i], done_flag, info, visited_chunks_list[env_i]
-                )
-                reward = env_reward + custom_r
+                if done1_flag:
+                    env_reward1 += DEATH_PENALTY
 
-                # E) Store transition
-                transitions_all_envs.append({
-                    "obs": obs_list[env_i],
-                    "next_obs": next_obs,
-                    "pi_dist": pi_dists[env_i],
-                    "v_pred": v_preds[env_i],
-                    "log_prob": log_probs[env_i],
-                    "old_pi_dist": old_pi_dist,
-                    "reward": reward,
-                    "done": done_flag
+                custom_r1, visited_chunks1 = custom_reward_function(obs1, done1_flag, info1, visited_chunks1)
+                reward1 = env_reward1 + custom_r1
+
+                transitions_all.append({
+                    "obs": obs1,
+                    "next_obs": next_obs1,
+                    "pi_dist": pi_dist1,
+                    "v_pred": v_pred1,
+                    "log_prob": log_prob1,
+                    "old_pi_dist": old_pi_dist1,
+                    "reward": reward1,
+                    "done": done1_flag
                 })
 
-                obs_list[env_i] = next_obs
-                done_list[env_i] = done_flag
+                obs1 = next_obs1
+                done1 = done1_flag
 
-                if done_flag:
-                    # Log the length of the episode
+                if done1:
+                    # Log the length
                     with open(out_episodes, "a") as f:
-                        f.write(f"{episode_step_counts[env_i]}\n")
+                        f.write(f"{episode_step_count1}\n")
+                    episode_step_count1 = 0
+                    obs1 = env1.reset()
+                    visited_chunks1.clear()
+                    done1 = False
 
-                    # Reset
-                    obs_list[env_i] = envs[env_i].reset()
-                    visited_chunks_list[env_i].clear()
-                    episode_step_counts[env_i] = 0
-                    done_list[env_i] = False
+            # C) For env2 if not done => same logic
+            if not done2:
+                episode_step_count2 += 1
 
-        # => now we have up to (num_envs * rollout_steps) transitions
-        if len(transitions_all_envs) == 0:
-            print("No transitions collected? continue.")
+                minerl_action2, pi_dist2, v_pred2, log_prob2, _ = \
+                    agent.get_action_and_training_info(obs2, stochastic=True)
+
+                with th.no_grad():
+                    obs_for_pretrained2 = agent._env_obs_to_agent(obs2)
+                    obs_for_pretrained2 = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained2)
+                    (old_pi_dist2, _, _), _ = pretrained_policy.policy(
+                        obs=obs_for_pretrained2,
+                        state_in=pretrained_policy.policy.initial_state(1),
+                        first=th.tensor([[False]], dtype=th.bool, device="cuda")
+                    )
+                old_pi_dist2 = tree_map(lambda x: x.detach(), old_pi_dist2)
+
+                try:
+                    next_obs2, env_reward2, done2_flag, info2 = env2.step(minerl_action2)
+                except Exception as e:
+                    print(f"Env2 step error: {e}")
+                    done2_flag = True
+                    env_reward2 = 0
+                    info2 = {}
+
+                if 'error' in info2:
+                    print(f"[Env2] Error in info: {info2['error']}. Ending episode.")
+                    done2_flag = True
+
+                if done2_flag:
+                    env_reward2 += DEATH_PENALTY
+
+                custom_r2, visited_chunks2 = custom_reward_function(obs2, done2_flag, info2, visited_chunks2)
+                reward2 = env_reward2 + custom_r2
+
+                transitions_all.append({
+                    "obs": obs2,
+                    "next_obs": next_obs2,
+                    "pi_dist": pi_dist2,
+                    "v_pred": v_pred2,
+                    "log_prob": log_prob2,
+                    "old_pi_dist": old_pi_dist2,
+                    "reward": reward2,
+                    "done": done2_flag
+                })
+
+                obs2 = next_obs2
+                done2 = done2_flag
+
+                if done2:
+                    with open(out_episodes, "a") as f:
+                        f.write(f"{episode_step_count2}\n")
+                    episode_step_count2 = 0
+                    obs2 = env2.reset()
+                    visited_chunks2.clear()
+                    done2 = False
+
+        # => done collecting up to 'rollout_steps' from each env
+        # We can do a single update now
+
+        if len(transitions_all) == 0:
+            print("No transitions collected, continuing.")
             continue
 
-        # F) Compute GAE for all transitions combined
-        #    Minimal approach: treat them as if they are one sequence. 
-        #    More correct: you'd separate them by environment episodes, do GAE per env. 
-        #    We'll do the naive approach for brevity:
-        transitions_all_envs = compute_gae(transitions_all_envs, agent, gamma=GAMMA, lam=LAM)
+        # F) GAE
+        transitions_all = compute_gae(transitions_all, agent, gamma=GAMMA, lam=LAM)
 
         # G) Single gradient update
         optimizer.zero_grad()
         total_loss_for_rollout = th.tensor(0.0, device="cuda")
 
-        for step_data in transitions_all_envs:
-            advantage = step_data["advantage"]
-            returns_ = step_data["return"]
-            log_prob = step_data["log_prob"]
-            pi_dist_current = step_data["pi_dist"]
-            pi_dist_pretrained = step_data["old_pi_dist"]
-
-            if (log_prob is None) or (pi_dist_current is None):
-                # Means that env was done at that step before we took an action
-                # or we had placeholders. Let's skip these. 
-                continue
-
+        for tdata in transitions_all:
+            advantage = tdata["advantage"]
+            returns_ = tdata["return"]
+            log_prob = tdata["log_prob"]
+            pi_dist_current = tdata["pi_dist"]
+            pi_dist_pretrained = tdata["old_pi_dist"]
+            # RL
             loss_rl = -(advantage * log_prob)
-            v_pred_ = step_data["v_pred"]
+            # Value
+            v_pred_ = tdata["v_pred"]
             value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
-
+            # KL
             loss_kl = compute_kl_loss(pi_dist_current, pi_dist_pretrained)
+
             total_loss_step = loss_rl + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * loss_kl)
             total_loss_for_rollout += total_loss_step.mean()
 
-        # Average the loss
-        n_valid = sum(1 for t in transitions_all_envs if t.get("log_prob") is not None)
-        if n_valid > 0:
-            total_loss_for_rollout = total_loss_for_rollout / n_valid
+        total_loss_for_rollout = total_loss_for_rollout / len(transitions_all)
+        total_loss_for_rollout.backward()
+        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+        optimizer.step()
 
-            total_loss_for_rollout.backward()
-            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
-            optimizer.step()
-
-            total_loss_val = total_loss_for_rollout.item()
-        else:
-            total_loss_val = 0.0
-
-        # Some stats
-        running_loss += total_loss_val * len(transitions_all_envs)
-        total_steps += len(transitions_all_envs)
+        total_loss_val = total_loss_for_rollout.item()
+        running_loss += total_loss_val * len(transitions_all)
+        total_steps += len(transitions_all)
         if total_steps > 0:
             avg_loss = running_loss / total_steps
         else:
             avg_loss = 0.0
-
-        # Decay KL
         LAMBDA_KL *= KL_DECAY
 
-        print(f"[Iter {iteration}] Loss={total_loss_val:.4f}, StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}")
+        print(f"[Iteration {iteration}] Loss={total_loss_val:.4f}, StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}")
 
-    # 5) Save weights
+    # 5) Save the final weights
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
 
@@ -330,8 +327,6 @@ if __name__ == "__main__":
                         help="Number of partial-rollout iterations")
     parser.add_argument("--rollout-steps", required=False, type=int, default=40,
                         help="How many steps per partial rollout")
-    parser.add_argument("--num-envs", required=False, type=int, default=2,
-                        help="Number of parallel envs to run")
 
     args = parser.parse_args()
 
@@ -341,6 +336,5 @@ if __name__ == "__main__":
         out_weights=args.out_weights,
         out_episodes=args.out_episodes,
         num_iterations=args.num_iterations,
-        rollout_steps=args.rollout_steps,
-        num_envs=args.num_envs
+        rollout_steps=args.rollout_steps
     )
