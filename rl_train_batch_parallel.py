@@ -1,3 +1,4 @@
+
 from argparse import ArgumentParser
 import pickle
 import time
@@ -28,17 +29,22 @@ def load_model_parameters(path_to_model_file):
 def compute_gae(transitions, agent, gamma=0.999, lam=0.95):
     """
     Naive GAE over one big list of transitions (from all envs).
-    For full correctness, you'd separate transitions per env or per done boundary,
-    but this minimal approach often works decently for short partial rollouts.
+    For full correctness, you'd separate transitions per env or per done boundary.
     """
     if len(transitions) == 0:
         return transitions
 
-    # If the last transition is not done, bootstrap
+    # If last transition not done => bootstrap
     if not transitions[-1]["done"]:
         with th.no_grad():
             final_next_obs = transitions[-1]["next_obs"]
-            _, _, v_next, _, _ = agent.get_action_and_training_info(final_next_obs, stochastic=False)
+            # We pass a zero or fresh hidden state since we only need the value, but
+            # in a perfect approach, we'd store the hidden state for that last env too.
+            dummy_hid = agent.policy.initial_state(batch_size=1)
+            # ignoring memory here is a small approximation
+            _, _, v_next, _, _ = agent.get_action_and_training_info(final_next_obs, 
+                                                                   hidden_state=dummy_hid,
+                                                                   stochastic=False)
         bootstrap_value = v_next.item()
     else:
         bootstrap_value = 0.0
@@ -49,11 +55,10 @@ def compute_gae(transitions, agent, gamma=0.999, lam=0.95):
         v_t = transitions[i]["v_pred"].item()
         done_t = transitions[i]["done"]
         mask = 1.0 - float(done_t)
-
         if i == len(transitions) - 1:
             next_value = bootstrap_value
         else:
-            next_value = transitions[i + 1]["v_pred"].item()
+            next_value = transitions[i+1]["v_pred"].item()
 
         delta = r_t + gamma * next_value * mask - v_t
         gae = delta + gamma * lam * mask * gae
@@ -74,11 +79,12 @@ def train_rl(
 ):
     """
     Runs `num_envs` parallel MineRL environments in a single process.
-    Each step, we do a forward pass for each env individually (not true batched),
-    and store transitions. After `rollout_steps`, do 1 gradient update.
+    Each step, we do a forward pass for each env individually,
+    BUT each env has its own hidden state so that memory doesn't bleed.
+    After `rollout_steps`, do 1 gradient update over all collected transitions.
     """
 
-    # ========== Hyperparams ==========
+    # Hyperparams
     LEARNING_RATE = 1e-6
     MAX_GRAD_NORM = 1.0
     LAMBDA_KL = 1.0
@@ -88,7 +94,7 @@ def train_rl(
     VALUE_LOSS_COEF = 0.5
     KL_DECAY = 0.9995
 
-    # ========== 1) Agent + Pretrained Policy ==========
+    # 1) Agent + Pretrained
     dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     agent = MineRLAgent(
@@ -108,48 +114,60 @@ def train_rl(
     for agent_param, pretrained_param in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
         assert agent_param.data_ptr() != pretrained_param.data_ptr(), "Weights are shared!"
 
-    # ========== 2) Create N environments + track their states ==========
+    # 2) Create envs
     envs = [HumanSurvival(**ENV_KWARGS).make() for _ in range(num_envs)]
     obs_list = [env.reset() for env in envs]
-    done_list = [False] * num_envs
+    done_list = [False]*num_envs
     visited_chunks_list = [set() for _ in range(num_envs)]
-    episode_step_counts = [0] * num_envs
+    episode_step_counts = [0]*num_envs
 
-    # ========== 3) Create Optimizer ==========
+    # *** Separate hidden states for each env
+    hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
+
+    # 3) Optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
-
     running_loss = 0.0
     total_steps = 0
 
-    # ========== 4) Outer loop over partial-rollout iterations ==========
+    # 4) Outer loop
     for iteration in range(num_iterations):
         print(f"[Iteration {iteration}] Starting partial-rollout...")
 
-        # We'll store transitions from *all* envs in one big list
         transitions_all = []
         step_count = 0
 
-        # We'll collect up to `rollout_steps` steps in lockstep
         while step_count < rollout_steps:
             step_count += 1
 
-            # A) Optional: Render each environment (this tries to open multiple windows).
+            # (Optional) Render each env
             for env_i in range(num_envs):
                 envs[env_i].render()
 
-            # B) Step each environment that isn't done
+            # Step each env
             for env_i in range(num_envs):
                 if not done_list[env_i]:
                     episode_step_counts[env_i] += 1
 
-                    # --- forward pass for a single env obs
-                    action_i, pi_dist_i, v_pred_i, log_prob_i, _ = \
-                        agent.get_action_and_training_info(obs_list[env_i], stochastic=True)
+                    # Instead of agent.get_action_and_training_info(obs) that uses self.hidden_state,
+                    # we call a new method that we allow passing hidden_states[env_i].
+                    # We'll define that below or modify agent code to support it.
+                    minerl_action_i, pi_dist_i, v_pred_i, log_prob_i, new_hid_i = \
+                        agent.get_action_and_training_info(
+                            obs_list[env_i],
+                            hidden_state=hidden_states[env_i],  # pass env-specific hidden state
+                            stochastic=True
+                        )
+                    # store the updated hidden state
+                    hidden_states[env_i] = new_hid_i
 
-                    # --- get pretrained policy dist for KL
+                    # Get pretrained policy dist for KL
                     with th.no_grad():
                         obs_for_pretrained = agent._env_obs_to_agent(obs_list[env_i])
                         obs_for_pretrained = tree_map(lambda x: x.unsqueeze(1), obs_for_pretrained)
+                        # For old policy, we can pass a fresh .initial_state(1) or store a separate hidden
+                        # if you want old policy's memory. Typically it's okay to pass a fresh one,
+                        # or store old policy states as well if you want a fully correct
+                        # "old memory" alignment. We'll do a fresh state:
                         (old_pi_dist_i, _, _), _ = pretrained_policy.policy(
                             obs=obs_for_pretrained,
                             state_in=pretrained_policy.policy.initial_state(1),
@@ -157,9 +175,9 @@ def train_rl(
                         )
                     old_pi_dist_i = tree_map(lambda x: x.detach(), old_pi_dist_i)
 
-                    # --- env step
+                    # Step env
                     try:
-                        next_obs_i, env_reward_i, done_flag_i, info_i = envs[env_i].step(action_i)
+                        next_obs_i, env_reward_i, done_flag_i, info_i = envs[env_i].step(minerl_action_i)
                     except Exception as e:
                         print(f"[Env {env_i}] step error: {e}")
                         done_flag_i = True
@@ -173,13 +191,11 @@ def train_rl(
                     if done_flag_i:
                         env_reward_i += DEATH_PENALTY
 
-                    # custom reward
                     custom_r_i, visited_chunks_list[env_i] = custom_reward_function(
                         obs_list[env_i], done_flag_i, info_i, visited_chunks_list[env_i]
                     )
                     reward_i = env_reward_i + custom_r_i
 
-                    # store transition
                     transitions_all.append({
                         "obs": obs_list[env_i],
                         "next_obs": next_obs_i,
@@ -196,7 +212,7 @@ def train_rl(
                     done_list[env_i] = done_flag_i
 
                     if done_flag_i:
-                        # log episode length
+                        # log ep length
                         with open(out_episodes, "a") as f:
                             f.write(f"{episode_step_counts[env_i]}\n")
                         episode_step_counts[env_i] = 0
@@ -204,16 +220,16 @@ def train_rl(
                         visited_chunks_list[env_i].clear()
                         done_list[env_i] = False
 
-        # => done collecting up to rollout_steps from each env
-        # => do a single update now
+                        # Also reset the hidden state for that env
+                        hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
+
+        # GAE and PPO update
         if len(transitions_all) == 0:
-            print("No transitions collected, continuing.")
+            print("No transitions collected.")
             continue
 
-        # F) GAE
         transitions_all = compute_gae(transitions_all, agent, gamma=GAMMA, lam=LAM)
 
-        # G) Single gradient update
         optimizer.zero_grad()
         total_loss_for_rollout = th.tensor(0.0, device="cuda")
 
@@ -224,12 +240,9 @@ def train_rl(
             pi_dist_current = tdata["pi_dist"]
             pi_dist_pretrained = tdata["old_pi_dist"]
 
-            # RL
             loss_rl = -(advantage * log_prob)
-            # Value
             v_pred_ = tdata["v_pred"]
             value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
-            # KL
             loss_kl = compute_kl_loss(pi_dist_current, pi_dist_pretrained)
 
             total_loss_step = loss_rl + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * loss_kl)
@@ -251,10 +264,8 @@ def train_rl(
 
         print(f"[Iteration {iteration}] Loss={total_loss_val:.4f}, StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}")
 
-    # ========== 5) Save the final weights ==========
     print(f"Saving fine-tuned weights to {out_weights}")
     th.save(agent.policy.state_dict(), out_weights)
-
 
 if __name__ == "__main__":
     parser = ArgumentParser()

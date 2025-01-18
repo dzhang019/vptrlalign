@@ -205,7 +205,7 @@ class MineRLAgent:
         )
         minerl_action = self._agent_action_to_env(agent_action)
         return minerl_action
-    
+    '''
     def get_action_and_training_info(self, minerl_obs, stochastic=True):
         """
         Similar to get_action(...), but also returns additional info
@@ -242,4 +242,27 @@ class MineRLAgent:
         pi_dist = result.get("pd", None)
 
         # Return everything needed for both environment stepping + RL training
+        return minerl_action, pi_dist, vpred, log_prob, new_hidden_state
+        '''
+    def get_action_and_training_info(self, minerl_obs, hidden_state, stochastic=True):
+        # 1) Convert obs
+        agent_input = self._env_obs_to_agent(minerl_obs)
+
+        # 2) Single-step forward pass with the provided hidden_state
+        #    (We do NOT use self.hidden_state or overwrite it internally)
+        agent_action, new_hidden_state, result = self.policy.act_train(
+            agent_input,
+            self._dummy_first,
+            hidden_state,  # use the passed-in hidden_state
+            stochastic=stochastic,
+            return_pd=True
+        )
+
+        minerl_action = self._agent_action_to_env(agent_action)
+
+        log_prob = result["log_prob"]
+        vpred = result["vpred"]
+        pi_dist = result.get("pd", None)
+
+        # Return everything, including new_hidden_state
         return minerl_action, pi_dist, vpred, log_prob, new_hidden_state
