@@ -244,7 +244,7 @@ class MineRLAgent:
         # Return everything needed for both environment stepping + RL training
         return minerl_action, pi_dist, vpred, log_prob, new_hidden_state
         '''
-    def get_action_and_training_info(self, minerl_obs, hidden_state, stochastic=True):
+    def get_action_and_training_info_old(self, minerl_obs, hidden_state, stochastic=True):
         # 1) Convert obs
         agent_input = self._env_obs_to_agent(minerl_obs)
 
@@ -266,3 +266,55 @@ class MineRLAgent:
 
         # Return everything, including new_hidden_state
         return minerl_action, pi_dist, vpred, log_prob, new_hidden_state
+    
+    def get_action_and_training_info(self, minerl_obs, hidden_state, stochastic=True, taken_action=None):
+        """
+        Single-step logic that wraps policy.act_train(...).
+        You can call this for:
+        - Environment stepping: pass 'taken_action=None' to sample an action.
+        - Re-forward at train time: pass 'taken_action' for the forced action.
+
+        Args:
+        minerl_obs: the raw MineRL observation (dict with 'pov' etc.)
+        hidden_state: the Transformer/LSTM hidden state for the current step
+        stochastic: whether to sample (if no forced action)
+        taken_action: if not None, a *factored* MineRL action that we force
+                        for log_prob calculation.
+        Returns:
+        minerl_action: an action in MineRL environment format
+        pi_dist: the distribution (if return_pd was True)
+        vpred: predicted value (tensor)
+        log_prob: log-prob of the chosen or forced action
+        new_hidden_state: the updated hidden state after this step
+        """
+
+        # 1) Convert MineRL observation to agent's input
+        agent_input = self._env_obs_to_agent(minerl_obs)
+
+        # 2) Policy call. 
+        #    If 'taken_action' is not None, we must convert that to the model's format 
+        #    before passing it. But let's do that internally if needed:
+        forced_action_torch = None
+        if taken_action is not None:
+            # Use the existing _env_action_to_agent(...) to convert to Tensors:
+            forced_action_torch = self._env_action_to_agent(taken_action, to_torch=True)
+
+        # 3) Single-step forward pass
+        agent_action, new_hidden_state, result = self.policy.act_train(
+            obs=agent_input,
+            first=self._dummy_first,   # or pass a real 'first' if you track episode starts
+            state_in=hidden_state,
+            stochastic=stochastic,
+            taken_action=forced_action_torch,  # forced action if not None
+            return_pd=True
+        )
+
+        # 4) Convert the policy's action => MineRL env format
+        minerl_action = self._agent_action_to_env(agent_action)
+
+        log_prob = result["log_prob"]
+        vpred = result["vpred"]
+        pi_dist = result.get("pd", None)
+
+        return minerl_action, pi_dist, vpred, log_prob, new_hidden_state
+

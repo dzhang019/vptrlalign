@@ -358,7 +358,7 @@ class MinecraftAgentPolicy(nn.Module):
 
         return ac, state_out, result
     
-    def act_train(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
+    def act_train_old(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
         # We need to add a fictitious time dimension everywhere
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
@@ -379,6 +379,60 @@ class MinecraftAgentPolicy(nn.Module):
         ac = tree_map(lambda x: x[:, 0], ac)
 
         return ac, state_out, result
+    
+    def act_train(
+        self,
+        obs,
+        first,
+        state_in,
+        stochastic: bool = True,
+        taken_action=None,
+        return_pd=False
+    ):
+        """
+        Single-step forward pass for a recurrent policy in 'train' mode.
+        If 'taken_action' is not None, we compute the log-prob of that forced action 
+        (instead of sampling a new one).
+        Returns:
+        - 'ac': the resulting action (sampled or forced)
+        - 'state_out': the next hidden state
+        - 'result': a dict with 'log_prob', 'vpred' and possibly distribution 'pd'.
+
+        This supports both environment stepping (taken_action=None, sample action) 
+        and re-forward at training time (taken_action != None, force an action).
+        """
+        # 1) Add fictitious time dimension
+        obs = tree_map(lambda x: x.unsqueeze(1), obs)
+        first = first.unsqueeze(1)
+
+        # 2) Forward pass through the policy
+        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+
+        # 3) Either sample an action or use the forced 'taken_action'
+        if taken_action is None:
+            ac = self.pi_head.sample(pd, deterministic=not stochastic)
+        else:
+            # Force the policy to use 'taken_action' for log_prob calculation
+            ac = tree_map(lambda x: x.unsqueeze(1), taken_action)
+
+        # 4) Compute log-prob of the chosen action
+        log_prob = self.pi_head.logprob(ac, pd)
+        assert not th.isnan(log_prob).any()
+
+        # 5) Squeeze out the time dimension
+        result = {
+            "log_prob": log_prob[:, 0],
+            "vpred": self.value_head.denormalize(vpred)[:, 0]
+        }
+        if return_pd:
+            # Return the policy distribution too, for KL or debugging
+            result["pd"] = tree_map(lambda x: x[:, 0], pd)
+
+        # Action 'ac' also shape [B, T, ...], so we flatten
+        ac = tree_map(lambda x: x[:, 0], ac)
+
+        return ac, state_out, result
+
 
     @th.no_grad()
     def v(self, obs, first, state_in):
