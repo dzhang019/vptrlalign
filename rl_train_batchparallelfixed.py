@@ -16,6 +16,8 @@ from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 
+th.autograd.set_detect_anomaly(True)
+
 
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
@@ -283,7 +285,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             "v_pred": v_pred,
             "log_prob": log_prob,
             "cur_pd": pi_dist,
-            "old_pd": old_pd["pd"] if isinstance(old_pd, dict) else old_pd,  # or parse if needed
+            "old_pd": old_pd,
             "next_obs": next_obs_t
         })
 
