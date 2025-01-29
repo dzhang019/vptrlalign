@@ -4,7 +4,7 @@ import numpy as np
 import cv2
 import gym
 import minerl
-import torch  # Added for GPU support
+import torch
 import math
 import time
 import os
@@ -41,11 +41,11 @@ def render_and_record(env, agent, out, frame_width, frame_height, tick_skip=4):
     obs = env.reset()
     done = False
 
-    # Move obs to GPU (if applicable)
+    # Move obs to GPU and fix stride issues
     if isinstance(obs, dict):
         for key in obs:
             if isinstance(obs[key], np.ndarray):
-                obs[key] = torch.tensor(obs[key], device=device, dtype=torch.float32)
+                obs[key] = torch.tensor(np.ascontiguousarray(obs[key]), device=device, dtype=torch.float32)
 
     # Initialize health, hunger, and position
     life_stats = obs.get("life_stats", {})
@@ -71,11 +71,11 @@ def render_and_record(env, agent, out, frame_width, frame_height, tick_skip=4):
             total_reward += reward
             step_count += 1
 
-            # Move obs to GPU (if applicable)
+            # Move obs to GPU and fix stride issues
             if isinstance(obs, dict):
                 for key in obs:
                     if isinstance(obs[key], np.ndarray):
-                        obs[key] = torch.tensor(obs[key], device=device, dtype=torch.float32)
+                        obs[key] = torch.tensor(np.ascontiguousarray(obs[key]), device=device, dtype=torch.float32)
 
             if done:
                 break
