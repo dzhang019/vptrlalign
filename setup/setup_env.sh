@@ -2,35 +2,26 @@
 
 # Update the system
 echo "Updating the system..."
-#sudo apt-get update -y
-apt-get update -y
-#sudo apt-get upgrade -y
-apt-get upgrade -y
+sudo apt-get update -y
+sudo apt-get upgrade -y
 
 # Install dependencies
 echo "Installing dependencies..."
-#sudo apt-get install -y software-properties-common wget curl tar
-apt-get install -y software-properties-common wget curl tar
+sudo apt-get install -y software-properties-common wget curl tar
 
 # Install Python 3.8.10
 echo "Installing Python 3.8.10..."
-#sudo add-apt-repository -y ppa:deadsnakes/ppa
-add-apt-repository -y ppa:deadsnakes/ppa
-#sudo apt-get update -y
-apt-get update -y
-#sudo apt-get install -y python3.8 python3.8-venv python3.8-dev
-apt-get install -y python3.8 python3.8-venv python3.8-dev
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt-get update -y
+sudo apt-get install -y python3.8 python3.8-venv python3.8-dev
 
 # Set Python 3.8.10 as the default Python version
-#sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
-update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
-#sudo update-alternatives --config python3 <<< '1'
-update-alternatives --config python3 <<< '1'
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
+sudo update-alternatives --config python3 <<< '1'
 
 # Install OpenJDK 8
 echo "Installing OpenJDK 8..."
-#sudo apt-get install -y openjdk-8-jdk
-apt-get install -y openjdk-8-jdk
+sudo apt-get install -y openjdk-8-jdk
 
 # Configure OpenJDK environment variables
 echo "Configuring JDK environment variables..."
