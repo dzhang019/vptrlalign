@@ -288,11 +288,10 @@ def act(actname, x):
 
 class SelfAttentionLayer(AttentionLayerBase):
     """
-    Residual attention layer that takes a single tensor x and has it attend to itself
-    Has the form
-        output = x + f(x)
+    Residual attention layer that takes a single tensor x and has it attend to itself.
+    Has the form:
+         output = x + f(x)
     """
-
     def __init__(
         self,
         x_size,
@@ -332,14 +331,26 @@ class SelfAttentionLayer(AttentionLayerBase):
         self.use_muP_factor = use_muP_factor
 
     def residual(self, X_bte, state):
-        X_bte = self.ln_x(X_bte)
-        Q_bte = self.q_layer(X_bte)
-        K_bte = self.k_layer(X_bte)
-        V_bte = self.v_layer(X_bte)
+        # Save a copy for the skip connection.
+        X_in = X_bte.clone()
+        # Compute layer norm on the input.
+        X_ln = self.ln_x(X_bte)
+        # Optionally, you can also clone X_ln if needed:
+        # X_ln = X_ln.clone()
+
+        # Compute Q, K, V from the normalized input.
+        Q_bte = self.q_layer(X_ln)
+        K_bte = self.k_layer(X_ln)
+        V_bte = self.v_layer(X_ln)
+
         if state:
             state, K_bte, V_bte = self.update_state(state, K_bte, V_bte)
+
+        # Preprocess Q, K, V (this returns a closure to postprocess the attention output).
         postproc_closure, Q_bte, K_bte, V_bte = self.attn.preproc_qkv(Q_bte, K_bte, V_bte)
-        extra_btT = self.relattn_logits(X_bte, K_bte.shape[1]) if self.relattn else None
+        extra_btT = self.relattn_logits(X_ln, K_bte.shape[1]) if self.relattn else None
+
+        # Perform the attention operation.
         A_bte = attention(
             Q_bte,
             K_bte,
@@ -356,6 +367,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         return Aproj_bte, state
 
     def forward(self, X_bte, state):
+        # Use the original input (X_bte) for the skip connection.
         R_bte, state = self.residual(X_bte, state)
         return X_bte + R_bte, state
 
@@ -365,25 +377,11 @@ class SelfAttentionLayer(AttentionLayerBase):
 
     def update_state(self, state, K_bte, V_bte):
         def append(prev, new):
-            """
-            Given `prev` keys from cache, and `new` keys,
-            returns (cache, full), where
-            - cache goes into the output state, length chosen so that on the
-                next timestep, there are enough cached timesteps to get the full
-                context of lenth self.maxlen.
-            - full is used for the current forward pass, with length chosen so
-                that the first timestep new[:, 0] gets to see a context of
-                self.maxlen.
-            """
             tprev = prev.shape[1]
             startfull = max(tprev - self.cache_keep_len, 0)
             full = th.cat([prev[:, startfull:], new], dim=1)
-            outstate = full[:, max(full.shape[1] - (self.cache_keep_len), 0) :]
-            # To see that the preceding slicing is correct, consider the case
-            # that maxlen==1. Then `full` only consists of `new`, and
-            # `outstate` is empty
+            outstate = full[:, max(full.shape[1] - self.cache_keep_len, 0):]
             return outstate, full
-
         instate_K, instate_V = state
         outstate_K, K_bte = append(instate_K, K_bte)
         outstate_V, V_bte = append(instate_V, V_bte)
