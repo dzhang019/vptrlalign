@@ -41,7 +41,7 @@ def train_rl(
       - We store only (obs, action, reward, done, hidden_state_before_step, next_obs).
       - No 'v_pred'/'log_prob' stored at rollout time. 
       - Then do a stepwise unroll at training time to recover them.
-
+    
     In each iteration:
       1) Collect up to `rollout_steps` steps from each of `num_envs`.
       2) Unroll each env's partial trajectory with the same hidden states + forced actions.
@@ -133,7 +133,7 @@ def train_rl(
                         minerl_obs=obs_list[env_i],
                         hidden_state=hidden_states[env_i],
                         stochastic=True,
-                        taken_action=None  # i.e. sample from policy
+                        taken_action=None  # sample from policy
                     )
 
                     # (B) Step the environment
@@ -181,7 +181,7 @@ def train_rl(
             )
             transitions_all.extend(env_transitions)
 
-        # if no transitions, skip
+        # If no transitions, skip the update.
         if len(transitions_all) == 0:
             print(f"[Iteration {iteration}] No transitions collected, skipping update.")
             continue
@@ -200,10 +200,10 @@ def train_rl(
             # RL Loss
             loss_rl = -(advantage * log_prob)
 
-            # Value loss
+            # Value loss (using an out-of-place operation)
             value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
 
-            # KL regularization
+            # KL regularization loss
             kl_loss = compute_kl_loss(cur_pd, old_pd)
 
             total_loss_step = loss_rl + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
@@ -252,7 +252,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         hid_t = rollout["hidden_states"][t]
         next_obs_t = rollout["next_obs"][t]
 
-        # (A) Force the same action to get log_prob, v_pred, distribution
+        # (A) Force the same action to get log_prob, v_pred, and the current distribution.
         minerl_action, pi_dist, v_pred, log_prob, hid_out = agent.get_action_and_training_info(
             minerl_obs=obs_t,
             hidden_state=hid_t,
@@ -260,7 +260,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             taken_action=act_t      # the action that was taken
         )
 
-        # (B) Get the pretrained distribution for KL regularization
+        # (B) Get the pretrained distribution for KL regularization.
         with th.no_grad():
             old_minerl_action, old_pd, old_vpred, old_logprob, _ = pretrained_policy.get_action_and_training_info(
                 obs_t, 
@@ -281,7 +281,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             "next_obs": next_obs_t
         })
 
-    # (C) Local GAE computation
+    # (C) Local GAE computation.
     if not transitions[-1]["done"]:
         with th.no_grad():
             _, _, v_next, _, _ = agent.get_action_and_training_info(
