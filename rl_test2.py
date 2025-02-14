@@ -27,6 +27,8 @@ def load_model_parameters(path_to_model_file):
     return policy_kwargs, pi_head_kwargs
 
 
+# ... (previous imports and code)
+
 def train_rl(
     in_model,
     in_weights,
@@ -36,6 +38,62 @@ def train_rl(
     rollout_steps=40,
     num_envs=2
 ):
+    # ... (existing setup code)
+
+    for iteration in range(num_iterations):
+        print(f"[Iteration {iteration}] Collecting up to {rollout_steps} steps per env...")
+
+        # ... (existing code)
+
+        # ==== 4) Environment stepping phase ====
+        step_count = 0
+        while step_count < rollout_steps:
+            step_count += 1
+            for env_i in range(num_envs):
+                envs[env_i].render()
+
+            for env_i in range(num_envs):
+                if not done_list[env_i]:
+                    episode_step_counts[env_i] += 1
+
+                    # (A) Sample an action and get the new hidden state WITH NO GRAD
+                    with th.no_grad():  # ADDED: Prevent computation graph during rollout
+                        minerl_action_i, _, _, _, new_hid_i = agent.get_action_and_training_info(
+                            minerl_obs=obs_list[env_i],
+                            hidden_state=hidden_states[env_i],
+                            stochastic=True,
+                            taken_action=None  # sample from policy
+                        )
+
+                    # (B) Step the environment
+                    next_obs_i, env_reward_i, done_flag_i, info_i = envs[env_i].step(minerl_action_i)
+                    if "error" in info_i:
+                        print(f"[Env {env_i}] Error in info: {info_i['error']}")
+                        done_flag_i = True
+
+                    if done_flag_i:
+                        env_reward_i += DEATH_PENALTY
+
+                    # (C) Store minimal data + hidden state (DETACHED)
+                    rollouts[env_i]["obs"].append(obs_list[env_i])
+                    rollouts[env_i]["actions"].append(minerl_action_i)
+                    rollouts[env_i]["rewards"].append(env_reward_i)
+                    rollouts[env_i]["dones"].append(done_flag_i)
+                    # Detach hidden state before storing
+                    rollouts[env_i]["hidden_states"].append(
+                        tree_map(lambda x: x.detach(), hidden_states[env_i])  # ADDED: Detach hidden state
+                    )
+                    rollouts[env_i]["next_obs"].append(next_obs_i)
+
+                    # (D) Update obs, hidden_state, done
+                    obs_list[env_i] = next_obs_i
+                    hidden_states[env_i] = tree_map(lambda x: x.detach(), new_hid_i)  # Ensure new_hid is detached
+                    done_list[env_i] = done_flag_i
+
+                    if done_flag_i:
+                        # ... (existing reset code)
+
+        # ... (rest of the training loop remains the same)
     """
     Approach #2, memory-correct:
       - We store only (obs, action, reward, done, hidden_state_before_step, next_obs).
