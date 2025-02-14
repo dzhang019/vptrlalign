@@ -50,8 +50,6 @@ def attention(
         bias = Q_bte.new_zeros((), dtype=th.float32)
     if extra_btT is not None:
         bias = bias + extra_btT
-    # Equivalent to bias + (1 / math.sqrt(e)) * th.einsum("bte,bpe->btp", Q_bte, K_bte)
-    # but faster:
     logit_btT = th.baddbmm(
         bias,
         Q_bte.float(),
@@ -62,11 +60,7 @@ def attention(
         logit_btT = logit_btT - 1e9 * invalid.float()
     W_btT = th.softmax(logit_btT, dim=2).to(dtype)
     if callable(V_bTe):
-        # This is used by the sharded video model to defer waiting on
-        # the broadcast of the values until they're needed
         V_bTe = V_bTe()
-    # th.einsum only lets you use lowercase letters, so 'p' for 'past'
-    # means 'T'
     A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
     return A_bte
 
@@ -76,12 +70,9 @@ class Attn:
     Defines an attention mechanism
     All the mechanisms here can be defined by two operations:
     1. preprocessing Q,K,V,R[=relative attention query]
-        to move axes from embedding dimension to
-        batch dimension, and possibly doing shifts.
-    2. postprocessing the final result to move axes back to embedding
-        axis.
+       to move axes from embedding dimension to batch dimension, and possibly doing shifts.
+    2. postprocessing the final result to move axes back to embedding axis.
     """
-
     def __init__(self, mask, maxlen):
         self.mask = mask
         self.maxlen = maxlen
@@ -333,24 +324,18 @@ class SelfAttentionLayer(AttentionLayerBase):
     def residual(self, X_bte, state):
         # Save a copy for the skip connection.
         X_in = X_bte.clone()
-        # Compute layer norm on the input.
-        X_ln = self.ln_x(X_bte)
-        # Optionally, you can also clone X_ln if needed:
-        # X_ln = X_ln.clone()
-
-        # Compute Q, K, V from the normalized input.
-        Q_bte = self.q_layer(X_ln)
-        K_bte = self.k_layer(X_ln)
-        V_bte = self.v_layer(X_ln)
-
+        # Apply layer norm on a clone of the input.
+        X_ln = self.ln_x(X_bte.clone())
+        # Pass clones of X_ln to each linear layer to avoid in-place modifications.
+        Q_bte = self.q_layer(X_ln.clone())
+        K_bte = self.k_layer(X_ln.clone())
+        V_bte = self.v_layer(X_ln.clone())
+        
         if state:
             state, K_bte, V_bte = self.update_state(state, K_bte, V_bte)
-
-        # Preprocess Q, K, V (this returns a closure to postprocess the attention output).
+        
         postproc_closure, Q_bte, K_bte, V_bte = self.attn.preproc_qkv(Q_bte, K_bte, V_bte)
         extra_btT = self.relattn_logits(X_ln, K_bte.shape[1]) if self.relattn else None
-
-        # Perform the attention operation.
         A_bte = attention(
             Q_bte,
             K_bte,
@@ -364,10 +349,12 @@ class SelfAttentionLayer(AttentionLayerBase):
         )
         A_bte = postproc_closure(A_bte)
         Aproj_bte = self.proj_layer(A_bte)
+        
+        # Return the residual projection.
         return Aproj_bte, state
 
     def forward(self, X_bte, state):
-        # Use the original input (X_bte) for the skip connection.
+        # Use the original input for the skip connection.
         R_bte, state = self.residual(X_bte, state)
         return X_bte + R_bte, state
 
@@ -402,7 +389,6 @@ class PointwiseLayer(nn.Module):
     """
     Residual MLP applied at each timestep
     """
-
     def __init__(self, x_size, scale, dtype, norm, actname="relu", mlp_ratio=2):
         super().__init__()
         s = math.sqrt(scale)
@@ -440,10 +426,7 @@ def _is_separate(sep, name):
 
 def make_maybe_multiscale(make_fn, *args, seqlens, separate, name, **kwargs):
     """
-    This function either creates one instance of a module or creates
-    a separate instance of the module for each resolution of the image,
-    determined by the `separate` parameter. We create separate modules
-    if `separate` is True or if `separate` is a set containing `name`.
+    Either creates one instance of a module or creates a separate instance of the module for each resolution.
     """
     if _is_separate(separate, name):
         modules = [make_fn(*args, **kwargs) for _ in seqlens]
