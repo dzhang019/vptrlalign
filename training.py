@@ -14,7 +14,7 @@ from lib.tree_util import tree_map
 from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
-from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+from night_hard import HumanSurvivalNight
 
 th.autograd.set_detect_anomaly(True)
 
