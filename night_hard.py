@@ -2,7 +2,6 @@ from minerl.herobraine.env_specs.human_controls import HumanControlEnvSpec
 from minerl.herobraine.hero.mc import ALL_ITEMS
 from minerl.herobraine.hero.handler import Handler
 import minerl.herobraine.hero.handlers as handlers
-from minerl.herobraine.hero.handlers.server import TimeCommand
 from typing import List
 
 # Corrected imports
@@ -65,9 +64,8 @@ class HumanSurvivalNight(HumanControlEnvSpec):
 
     def create_server_initial_conditions(self) -> List[Handler]:
         return super().create_server_initial_conditions() + [
-            handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
+            handlers.TimeInitialCondition(allow_passage_of_time=True, start_time: 13000),
             handlers.SpawningInitialCondition(allow_spawning=True),
-            TimeCommand(13000),
             DifficultyInitialCondition("hard"),  # Now using the correctly imported class
             GameRuleHandler({  # Now using the correctly imported class
                 "naturalRegeneration": "false",
