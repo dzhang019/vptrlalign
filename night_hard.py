@@ -52,7 +52,10 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return []
 
     def create_server_world_generators(self) -> List[Handler]:
-        return [handlers.DefaultWorldGenerator(force_reset=True)]
+        return [handlers.DefaultWorldGenerator(
+            force_reset=True,
+            reset_to_time=13000  # Sync with initial conditions
+        )]
 
     def create_server_quit_producers(self) -> List[Handler]:
         return [
@@ -63,17 +66,19 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return []
 
     def create_server_initial_conditions(self) -> List[Handler]:
-        return super().create_server_initial_conditions() + [
-            handlers.TimeInitialCondition(allow_passage_of_time=True, start_time: 13000),
+        return [
+            handlers.TimeInitialCondition(
+                allow_passage_of_time=True, 
+                start_time=13000  # Correct syntax (no colon)
+            ),
             handlers.SpawningInitialCondition(allow_spawning=True),
-            DifficultyInitialCondition("hard"),  # Now using the correctly imported class
-            GameRuleHandler({  # Now using the correctly imported class
+            DifficultyInitialCondition("hard"),
+            GameRuleHandler({
                 "naturalRegeneration": "false",
                 "doDaylightCycle": "true",
                 "hunger": "fast"
             }),
         ]
-
     def determine_success_from_rewards(self, rewards: list) -> bool:
         return True
 
