@@ -2,6 +2,7 @@ from minerl.herobraine.env_specs.human_controls import HumanControlEnvSpec
 from minerl.herobraine.hero.mc import ALL_ITEMS
 from minerl.herobraine.hero.handler import Handler
 import minerl.herobraine.hero.handlers as handlers
+from minerl.herobraine.hero.handlers.server import TimeCommand
 from typing import List
 
 # Corrected imports
@@ -66,6 +67,7 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return super().create_server_initial_conditions() + [
             handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
             handlers.SpawningInitialCondition(allow_spawning=True),
+            TimeCommand(13000),
             DifficultyInitialCondition("hard"),  # Now using the correctly imported class
             GameRuleHandler({  # Now using the correctly imported class
                 "naturalRegeneration": "false",
@@ -82,22 +84,3 @@ class HumanSurvivalNight(HumanControlEnvSpec):
 
     def get_docstring(self):
         return "A custom MineRL environment where difficulty is set to 'hard' and hunger drops quickly."
-
-    def create_server_world_generators(self) -> List[Handler]:
-        return [handlers.DefaultWorldGenerator(
-            force_reset=True,
-            reset_to_time=13000  # Add this to sync with initial conditions
-        )]
-
-    def create_server_initial_conditions(self) -> List[Handler]:
-        return [
-            # Replace super() call with explicit handlers
-            handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
-            handlers.SpawningInitialCondition(allow_spawning=True),
-            DifficultyInitialCondition("hard"),
-            GameRuleHandler({
-                "naturalRegeneration": "false",
-                "doDaylightCycle": "true",
-                "hunger": "fast"
-            }),
-        ]
