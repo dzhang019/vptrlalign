@@ -7,7 +7,7 @@ from typing import List
 # Import the custom handlers
 from minerl.herobraine.hero.handlers.server.server_conditions import DifficultyInitialCondition, GameRuleHandler
 
-class HumanSurvivalHard(HumanControlEnvSpec):
+class HumanSurvivalNight(HumanControlEnvSpec):
     def __init__(self, *args, load_filename=None, **kwargs):
         if "name" not in kwargs:
             kwargs["name"] = "MineRLHumanSurvivalHard-v0"
