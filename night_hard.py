@@ -4,8 +4,9 @@ from minerl.herobraine.hero.handler import Handler
 import minerl.herobraine.hero.handlers as handlers
 from typing import List
 
-# Import the custom handlers
-from minerl.herobraine.hero.handlers.server.server_conditions import DifficultyInitialCondition, GameRuleHandler
+# Corrected imports
+from minerl.herobraine.hero.handlers.initial_conditions import DifficultyInitialCondition
+from minerl.herobraine.hero.handlers.server import GameRuleHandler
 
 class HumanSurvivalNight(HumanControlEnvSpec):
     def __init__(self, *args, load_filename=None, **kwargs):
@@ -65,11 +66,11 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return super().create_server_initial_conditions() + [
             handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
             handlers.SpawningInitialCondition(allow_spawning=True),
-            DifficultyInitialCondition("hard"),  # Set difficulty to hard
-            GameRuleHandler({
-                "naturalRegeneration": "false",  # Disable natural regeneration
-                "doDaylightCycle": "true",      # Enable daylight cycle
-                "hunger": "fast"                # Configure hunger to drop quickly
+            DifficultyInitialCondition("hard"),  # Now using the correctly imported class
+            GameRuleHandler({  # Now using the correctly imported class
+                "naturalRegeneration": "false",
+                "doDaylightCycle": "true",
+                "hunger": "fast"
             }),
         ]
 
