@@ -82,3 +82,22 @@ class HumanSurvivalNight(HumanControlEnvSpec):
 
     def get_docstring(self):
         return "A custom MineRL environment where difficulty is set to 'hard' and hunger drops quickly."
+
+    def create_server_world_generators(self) -> List[Handler]:
+        return [handlers.DefaultWorldGenerator(
+            force_reset=True,
+            reset_to_time=13000  # Add this to sync with initial conditions
+        )]
+
+    def create_server_initial_conditions(self) -> List[Handler]:
+        return [
+            # Replace super() call with explicit handlers
+            handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
+            handlers.SpawningInitialCondition(allow_spawning=True),
+            DifficultyInitialCondition("hard"),
+            GameRuleHandler({
+                "naturalRegeneration": "false",
+                "doDaylightCycle": "true",
+                "hunger": "fast"
+            }),
+        ]
