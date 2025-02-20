@@ -6,7 +6,7 @@ from night import HumanSurvivalNight
 from agent import MineRLAgent, ENV_KWARGS
 
 def main(model, weights):
-    env = HumanSurvival(**ENV_KWARGS).make()
+    env = HumanSurvivalNight(**ENV_KWARGS).make()
     print("---Loading model---")
     agent_parameters = pickle.load(open(model, "rb"))
     policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
