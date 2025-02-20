@@ -1,67 +1,67 @@
-from minerl.herobraine.env_specs.human_controls import HumanControlEnvSpec
-from minerl.herobraine.hero.mc import MS_PER_STEP, STEPS_PER_MS, ALL_ITEMS
+# Copyright (c) 2020 All Rights Reserved
+# Author: William H. Guss, Brandon Houghton
+from minerl.herobraine.env_specs.simple_embodiment import SimpleEmbodimentEnvSpec
 from minerl.herobraine.hero.handler import Handler
-import minerl.herobraine.hero.handlers as handlers
 from typing import List
+
+import gym
 
 import minerl.herobraine
 import minerl.herobraine.hero.handlers as handlers
+from minerl.herobraine.hero.handlers import TranslationHandler
+from minerl.herobraine.hero.mc import ALL_ITEMS, INVERSE_KEYMAP
 from minerl.herobraine.env_spec import EnvSpec
 
+from collections import OrderedDict
 
-class HumanSurvivalNight(HumanControlEnvSpec):
-    def __init__(self, *args, load_filename=None, **kwargs):
-        if "name" not in kwargs:
-            kwargs["name"] = "MineRLHumanSurvivalNight-v0"
-        self.load_filename = load_filename
-        super().__init__(
-            *args, **kwargs
-        )
+# none = ['none']
+# other = ['other']
 
-    def create_observables(self) -> List[Handler]:
-        return super().create_observables() + [
-            handlers.EquippedItemObservation(
-                items=ALL_ITEMS,
-                mainhand=True,
-                offhand=True,
-                armor=True,
-                _default="air",
-                _other="air",
-            ),
-            handlers.ObservationFromLifeStats(),
-            handlers.ObservationFromCurrentLocation(),
-            handlers.ObserveFromFullStats("use_item"),
-            handlers.ObserveFromFullStats("drop"),
-            handlers.ObserveFromFullStats("pickup"),
-            handlers.ObserveFromFullStats("break_item"),
-            handlers.ObserveFromFullStats("craft_item"),
-            handlers.ObserveFromFullStats("mine_block"),
-            handlers.ObserveFromFullStats("damage_dealt"),
-            handlers.ObserveFromFullStats("entity_killed_by"),
-            handlers.ObserveFromFullStats("kill_entity"),
-            handlers.ObserveFromFullStats(None),
-        ]
+# The intent of this env_spec is to have all of the basic commands available to the agent for mirroring human demos
+SURVIVIAL_DOC = """
 
+In Survival, the agent has no defined rewards and the episode ends on death or 24 hr of out-of-game time.
+ 
+The agent begins in a random biome with no inventory at time=0 and has access to human-level commands. 
+
+Currently the agent has access to the cheating smelting command but this will be removed in a future iteration. 
+
+This environment most closely represents the open-world objective of vanilla Minecraft, except the episode ends on death
+"""
+MS_PER_STEP = 50
+NONE = 'none'
+OTHER = 'other'
+
+
+class HumanSurvivalNight(SimpleEmbodimentEnvSpec):
+    def __init__(self, *args, **kwargs):
+        if 'name' not in kwargs:
+            kwargs['name'] = 'MineRLSurvivalNight-v0'
+        # TODO determine if we actually need to limit episode steps
+        if 'max_episode_steps' not in kwargs:
+            kwargs['max_episode_steps'] = 24 * 60 * 60 * 20  # 24 hours * 20hz
+        self.episode_len = kwargs['max_episode_steps']
+        super().__init__(*args, **kwargs)
 
     def create_rewardables(self) -> List[Handler]:
         return []
 
     def create_agent_start(self) -> List[Handler]:
-        retval = super().create_agent_start()
-        if self.load_filename is not None:
-            retval.append(handlers.LoadWorldAgentStart(self.load_filename))
-        return retval
+        return []
 
     def create_agent_handlers(self) -> List[Handler]:
         return []
 
     def create_server_world_generators(self) -> List[Handler]:
-        return [handlers.DefaultWorldGenerator(force_reset=True)]
+        return [
+            handlers.DefaultWorldGenerator(force_reset="true", generator_options="")
+        ]
 
     def create_server_quit_producers(self) -> List[Handler]:
         return [
-            # handlers.ServerQuitFromTimeUp((EPISODE_LENGTH * MS_PER_STEP)),
-            handlers.ServerQuitWhenAnyAgentFinishes(),
+            handlers.ServerQuitFromTimeUp(
+                (self.episode_len * MS_PER_STEP)),
+            handlers.ServerQuitWhenAnyAgentFinishes()
         ]
 
     def create_server_decorators(self) -> List[Handler]:
@@ -79,10 +79,38 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         ]
 
     def determine_success_from_rewards(self, rewards: list) -> bool:
+        # All survival experiemnts are a success =)
         return True
 
     def is_from_folder(self, folder: str) -> bool:
-        return True
+        return folder == 'none'
 
     def get_docstring(self):
-        return ""
+        return SURVIVIAL_DOC
+
+    def create_mission_handlers(self) -> List[Handler]:
+        return []
+
+    def create_observables(self) -> List[Handler]:
+        return [
+            handlers.POVObservation(self.resolution),
+            handlers.FlatInventoryObservation(ALL_ITEMS),
+            handlers.TypeObservation('mainhand', none + ALL_ITEMS + other),
+            handlers.DamageObservation('mainhand'),
+            handlers.MaxDamageObservation('mainhand'),
+            handlers.ObservationFromCurrentLocation()
+        ]
+
+    def create_actionables(self) -> List[Handler]:
+        actionables = [
+            handlers.KeyboardAction(k, v) for k, v in INVERSE_KEYMAP.items()
+        ]
+        actionables += [
+            handlers.CraftItem(none + ALL_ITEMS),
+            handlers.CraftItemNearby(none + ALL_ITEMS),
+            handlers.SmeltItemNearby(none + ALL_ITEMS),
+            handlers.PlaceBlock(none + ALL_ITEMS),
+            handlers.EquipItem(none + ALL_ITEMS),
+            handlers.Camera(),
+        ]
+        return actionables
