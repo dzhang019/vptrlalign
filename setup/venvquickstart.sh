@@ -19,6 +19,9 @@ pip install git+https://github.com/minerllabs/minerl
 echo "Installing PyTorch..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
+#install gym, gym3, attr, attrs
+pip install gym gym3 aatr attrs
+
 # Check if requirements.txt exists and install dependencies
 REQUIREMENTS_FILE="requirements.txt"
 if [ -f "$REQUIREMENTS_FILE" ]; then
