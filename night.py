@@ -56,7 +56,7 @@ class Survival(HumanControlEnvSpec):
         return []
 
     def create_server_world_generators(self) -> List[Handler]:
-        return [handlers.DefaultWorldGenerator(force_reset=True)]
+        return [handlers.DefaultWorldGenerator(force_reset=False)]
 
     def create_server_quit_producers(self) -> List[Handler]:
         return [
@@ -69,7 +69,7 @@ class Survival(HumanControlEnvSpec):
 
     def create_server_initial_conditions(self) -> List[Handler]:
         return [
-            handlers.TimeInitialCondition(allow_passage_of_time=True),
+            handlers.TimeInitialCondition(start_time=13000,allow_passage_of_time=True),
             handlers.SpawningInitialCondition(allow_spawning=True),
         ]
 
