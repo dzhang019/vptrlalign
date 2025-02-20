@@ -1,7 +1,7 @@
 from argparse import ArgumentParser
 import pickle
 
-from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+from night import HumanSurvivalNight
 
 from agent import MineRLAgent, ENV_KWARGS
 
