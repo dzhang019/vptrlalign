@@ -70,7 +70,7 @@ class HumanSurvivalNight(HumanControlEnvSpec):
     def create_server_initial_conditions(self) -> List[Handler]:
         return [
             handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
-            handlers.SpawningInitialCondition(allow_spawning=False),
+            handlers.SpawningInitialCondition(allow_spawning=True),
         ]
 
     def determine_success_from_rewards(self, rewards: list) -> bool:
