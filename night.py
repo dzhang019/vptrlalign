@@ -12,7 +12,7 @@ from minerl.herobraine.env_spec import EnvSpec
 class HumanSurvivalNight(HumanControlEnvSpec):
     def __init__(self, *args, load_filename=None, **kwargs):
         if "name" not in kwargs:
-            kwargs["name"] = "MineRLHumanSurvival-v0"
+            kwargs["name"] = "MineRLHumanSurvivalNight-v0"
         self.load_filename = load_filename
         super().__init__(
             *args, **kwargs
@@ -69,8 +69,13 @@ class HumanSurvivalNight(HumanControlEnvSpec):
 
     def create_server_initial_conditions(self) -> List[Handler]:
         return [
-            handlers.TimeInitialCondition(allow_passage_of_time=True, start_time=13000),
-            handlers.SpawningInitialCondition(allow_spawning=True),
+            handlers.TimeInitialCondition(
+                allow_passage_of_time=True,
+                start_time=13000
+            ),
+            handlers.SpawningInitialCondition(
+                allow_spawning=True
+            )
         ]
 
     def determine_success_from_rewards(self, rewards: list) -> bool:
