@@ -17,7 +17,7 @@ def main(model, weights):
 
     print("---Launching MineRL enviroment (be patient)---")
     obs = env.reset()
-    print("Initial time:", obs["time"]) #Display current time
+    #print("Initial time:", obs["time"]) #Display current time
 
     while True:
         minerl_action = agent.get_action(obs)
