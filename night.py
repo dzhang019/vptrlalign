@@ -9,7 +9,7 @@ import minerl.herobraine.hero.handlers as handlers
 from minerl.herobraine.env_spec import EnvSpec
 
 
-class HumanSurvival(HumanControlEnvSpec):
+class HumanSurvivalNight(HumanControlEnvSpec):
     def __init__(self, *args, load_filename=None, **kwargs):
         if "name" not in kwargs:
             kwargs["name"] = "MineRLHumanSurvival-v0"
