@@ -37,11 +37,37 @@ class HumanSurvivalNight(SimpleEmbodimentEnvSpec):
     def __init__(self, *args, **kwargs):
         if 'name' not in kwargs:
             kwargs['name'] = 'MineRLSurvivalNight-v0'
-        # TODO determine if we actually need to limit episode steps
-        if 'max_episode_steps' not in kwargs:
-            kwargs['max_episode_steps'] = 24 * 60 * 60 * 20  # 24 hours * 20hz
-        self.episode_len = kwargs['max_episode_steps']
+        kwargs.setdefault('max_episode_steps', 24 * 60 * 60 * 20)  # 24 hours at 20Hz
         super().__init__(*args, **kwargs)
+
+    def create_server_world_generators(self) -> List[Handler]:
+        return [
+            handlers.DefaultWorldGenerator(
+                force_reset=True,
+                reset_to_time=13000  # Sync worldgen time with initial conditions
+            )
+        ]
+
+    def create_server_initial_conditions(self) -> List[Handler]:
+        return [
+            handlers.TimeInitialCondition(
+                allow_passage_of_time=True,
+                start_time=13000  # 13000 ticks = night time
+            ),
+            handlers.SpawningInitialCondition(allow_spawning=True),
+            handlers.DifficultyInitialCondition("normal")  # Add explicit difficulty
+        ]
+
+    def create_observables(self) -> List[Handler]:
+        return [
+            handlers.POVObservation(self.resolution),
+            handlers.FlatInventoryObservation(ALL_ITEMS),
+            handlers.TypeObservation('mainhand', ['none'] + ALL_ITEMS + ['other']),
+            handlers.DamageObservation('mainhand'),
+            handlers.MaxDamageObservation('mainhand'),
+            handlers.ObservationFromCurrentLocation(),
+            handlers.ObservationFromTime()  # Add time observation
+        ]
 
     def create_rewardables(self) -> List[Handler]:
         return []
@@ -51,11 +77,6 @@ class HumanSurvivalNight(SimpleEmbodimentEnvSpec):
 
     def create_agent_handlers(self) -> List[Handler]:
         return []
-
-    def create_server_world_generators(self) -> List[Handler]:
-        return [
-            handlers.DefaultWorldGenerator(force_reset="true", generator_options="")
-        ]
 
     def create_server_quit_producers(self) -> List[Handler]:
         return [
@@ -67,16 +88,6 @@ class HumanSurvivalNight(SimpleEmbodimentEnvSpec):
     def create_server_decorators(self) -> List[Handler]:
         return []
 
-    def create_server_initial_conditions(self) -> List[Handler]:
-        return [
-            handlers.TimeInitialCondition(
-                allow_passage_of_time=True,
-                start_time=13000
-            ),
-            handlers.SpawningInitialCondition(
-                allow_spawning=True
-            )
-        ]
 
     def determine_success_from_rewards(self, rewards: list) -> bool:
         # All survival experiemnts are a success =)
@@ -90,16 +101,6 @@ class HumanSurvivalNight(SimpleEmbodimentEnvSpec):
 
     def create_mission_handlers(self) -> List[Handler]:
         return []
-
-    def create_observables(self) -> List[Handler]:
-        return [
-            handlers.POVObservation(self.resolution),
-            handlers.FlatInventoryObservation(ALL_ITEMS),
-            handlers.TypeObservation('mainhand', none + ALL_ITEMS + other),
-            handlers.DamageObservation('mainhand'),
-            handlers.MaxDamageObservation('mainhand'),
-            handlers.ObservationFromCurrentLocation()
-        ]
 
     def create_actionables(self) -> List[Handler]:
         actionables = [
