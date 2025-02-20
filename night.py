@@ -59,15 +59,22 @@ class HumanSurvivalNight(SimpleEmbodimentEnvSpec):
         ]
 
     def create_observables(self) -> List[Handler]:
-        return [
-            handlers.POVObservation(self.resolution),
-            handlers.FlatInventoryObservation(ALL_ITEMS),
-            handlers.TypeObservation('mainhand', ['none'] + ALL_ITEMS + ['other']),
-            handlers.DamageObservation('mainhand'),
-            handlers.MaxDamageObservation('mainhand'),
-            handlers.ObservationFromCurrentLocation(),
-            handlers.ObservationFromTime()  # Add time observation
-        ]
+    return [
+        handlers.POVObservation(self.resolution),
+        handlers.FlatInventoryObservation(ALL_ITEMS),
+        handlers.EquippedItemObservation(  # Replace TypeObservation with this
+            items=ALL_ITEMS,
+            mainhand=True,
+            offhand=False,
+            armor=False,
+            _default="none",
+            _other="other"
+        ),
+        handlers.DamageObservation('mainhand'),
+        handlers.MaxDamageObservation('mainhand'),
+        handlers.ObservationFromCurrentLocation(),
+        handlers.ObservationFromTime()
+    ]
 
     def create_rewardables(self) -> List[Handler]:
         return []
