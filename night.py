@@ -1,13 +1,16 @@
 from minerl.herobraine.env_specs.human_controls import HumanControlEnvSpec
 from minerl.herobraine.hero.mc import ALL_ITEMS
 from minerl.herobraine.hero.handler import Handler
-from minerl.herobraine.hero import handlers
+import minerl.herobraine.hero.handlers as handlers
 from typing import List
 
-class HumanSurvivalNight(HumanControlEnvSpec):
+# Import the custom handlers
+from minerl.herobraine.hero.handlers.server.server_conditions import DifficultyInitialCondition, GameRuleHandler
+
+class HumanSurvivalHard(HumanControlEnvSpec):
     def __init__(self, *args, load_filename=None, **kwargs):
         if "name" not in kwargs:
-            kwargs["name"] = "MineRLHumanSurvivalNight-v0"
+            kwargs["name"] = "MineRLHumanSurvivalHard-v0"
         self.load_filename = load_filename
         super().__init__(*args, **kwargs)
 
@@ -39,9 +42,10 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return []
 
     def create_agent_start(self) -> List[Handler]:
-        return super().create_agent_start() + [
-            handlers.DoneOnDeath()
-        ]
+        retval = super().create_agent_start()
+        if self.load_filename is not None:
+            retval.append(handlers.LoadWorldAgentStart(self.load_filename))
+        return retval
 
     def create_agent_handlers(self) -> List[Handler]:
         return []
@@ -50,16 +54,23 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return [handlers.DefaultWorldGenerator(force_reset=True)]
 
     def create_server_quit_producers(self) -> List[Handler]:
-        return [handlers.ServerQuitWhenAnyAgentFinishes()]
+        return [
+            handlers.ServerQuitWhenAnyAgentFinishes(),
+        ]
 
     def create_server_decorators(self) -> List[Handler]:
         return []
 
     def create_server_initial_conditions(self) -> List[Handler]:
-        return [
-            # Set initial time to midnight (18000 ticks)
-            handlers.TimeInitialCondition(start_time=18000, allow_passage_of_time=True),
+        return super().create_server_initial_conditions() + [
+            handlers.TimeInitialCondition(allow_passage_of_time=False, 13000),
             handlers.SpawningInitialCondition(allow_spawning=True),
+            DifficultyInitialCondition("hard"),  # Set difficulty to hard
+            GameRuleHandler({
+                "naturalRegeneration": "false",  # Disable natural regeneration
+                "doDaylightCycle": "true",      # Enable daylight cycle
+                "hunger": "fast"                # Configure hunger to drop quickly
+            }),
         ]
 
     def determine_success_from_rewards(self, rewards: list) -> bool:
@@ -69,4 +80,4 @@ class HumanSurvivalNight(HumanControlEnvSpec):
         return True
 
     def get_docstring(self):
-        return "A survival environment that starts at night time."
+        return "A custom MineRL environment where difficulty is set to 'hard' and hunger drops quickly."
