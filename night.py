@@ -1,18 +1,22 @@
 from minerl.herobraine.env_specs.human_controls import HumanControlEnvSpec
-from minerl.herobraine.hero.mc import ALL_ITEMS
+from minerl.herobraine.hero.mc import MS_PER_STEP, STEPS_PER_MS, ALL_ITEMS
 from minerl.herobraine.hero.handler import Handler
-import minerl.herobraine.hero.handlers as handlers
+from minerl.herobraine.hero import handlers
 from typing import List
 
-# Import the custom handlers
-from minerl.herobraine.hero.handlers.server.server_conditions import DifficultyInitialCondition, GameRuleHandler
 
-class HumanSurvivalHard(HumanControlEnvSpec):
+import minerl.herobraine
+from minerl.herobraine.env_spec import EnvSpec
+
+
+class HumanSurvivalNight(HumanControlEnvSpec):
     def __init__(self, *args, load_filename=None, **kwargs):
         if "name" not in kwargs:
-            kwargs["name"] = "MineRLHumanSurvivalHard-v0"
+            kwargs["name"] = "MineRLHumanSurvival-v0"
         self.load_filename = load_filename
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args, **kwargs
+        )
 
     def create_observables(self) -> List[Handler]:
         return super().create_observables() + [
@@ -38,15 +42,18 @@ class HumanSurvivalHard(HumanControlEnvSpec):
             handlers.ObserveFromFullStats(None),
         ]
 
+
     def create_rewardables(self) -> List[Handler]:
         return []
 
     def create_agent_start(self) -> List[Handler]:
-        retval = super().create_agent_start()
-        if self.load_filename is not None:
-            retval.append(handlers.LoadWorldAgentStart(self.load_filename))
-        return retval
-
+        #retval = super().create_agent_start()
+        #if self.load_filename is not None:
+        #    retval.append(handlers.LoadWorldAgentStart(self.load_filename))
+        #return retval
+        return super().create_agent_start() + [
+                handlers.DoneOnDeath()
+        ]
     def create_agent_handlers(self) -> List[Handler]:
         return []
 
@@ -55,6 +62,7 @@ class HumanSurvivalHard(HumanControlEnvSpec):
 
     def create_server_quit_producers(self) -> List[Handler]:
         return [
+            # handlers.ServerQuitFromTimeUp((EPISODE_LENGTH * MS_PER_STEP)),
             handlers.ServerQuitWhenAnyAgentFinishes(),
         ]
 
@@ -62,15 +70,10 @@ class HumanSurvivalHard(HumanControlEnvSpec):
         return []
 
     def create_server_initial_conditions(self) -> List[Handler]:
-        return super().create_server_initial_conditions() + [
-            handlers.TimeInitialCondition(allow_passage_of_time=False, 13000),
+        return [
+            handlers.TimeInitialCondition(allow_passage_of_time=False, start_time=13000),
             handlers.SpawningInitialCondition(allow_spawning=True),
-            DifficultyInitialCondition("hard"),  # Set difficulty to hard
-            GameRuleHandler({
-                "naturalRegeneration": "false",  # Disable natural regeneration
-                "doDaylightCycle": "true",      # Enable daylight cycle
-                "hunger": "fast"                # Configure hunger to drop quickly
-            }),
+            #DoneOnDeath()
         ]
 
     def determine_success_from_rewards(self, rewards: list) -> bool:
@@ -80,4 +83,4 @@ class HumanSurvivalHard(HumanControlEnvSpec):
         return True
 
     def get_docstring(self):
-        return "A custom MineRL environment where difficulty is set to 'hard' and hunger drops quickly."
+        return ""
