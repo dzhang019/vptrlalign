@@ -1,4 +1,4 @@
-def custom_reward_function_vpt(obs, done, info, visited_squares):
+def custom_reward_function(obs, done, info, visited_squares):
     """
     Reward the agent for construction activities (developing new map squares) 
     and survival. The long-term, unattainable goal is to build on every square of the map,
