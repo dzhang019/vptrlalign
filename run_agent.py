@@ -12,18 +12,22 @@ def main(model, weights):
     policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
     pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
-    agent = MineRLAgent(env, device = "cuda", policy_kwargs=policy_kwargs, pi_head_kwargs=pi_head_kwargs)
+    agent = MineRLAgent(env, device="cuda", policy_kwargs=policy_kwargs, pi_head_kwargs=pi_head_kwargs)
     agent.load_weights(weights)
 
-    print("---Launching MineRL enviroment (be patient)---")
+    print("---Launching MineRL environment (be patient)---")
     obs = env.reset()
-    #print("Initial time:", obs["time"]) #Display current time
-
+    
+    # Send a chat command to set the time to night
+    chat_action = {"chat": "/time set night"}
+    obs, reward, done, info = env.step(chat_action)
+    
     while True:
         minerl_action = agent.get_action(obs)
         print(minerl_action)
         obs, reward, done, info = env.step(minerl_action)
         env.render()
+
 
 
 if __name__ == "__main__":
