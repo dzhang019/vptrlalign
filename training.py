@@ -11,7 +11,7 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-from lib.reward_structure_mod import custom_reward_function
+from lib.height import reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
@@ -41,9 +41,9 @@ def train_rl(
     """
 
     # ==== Hyperparams ====
-    LEARNING_RATE = 1e-6
+    LEARNING_RATE = 3e-7
     MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 1.0
+    LAMBDA_KL = 50.0
     GAMMA = 0.9999
     LAM = 0.95
     DEATH_PENALTY = -1000.0
