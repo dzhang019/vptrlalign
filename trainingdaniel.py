@@ -274,9 +274,12 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
 
     if not transitions[-1]["done"]:
         with th.no_grad():
+            hid_t_cpu = rollout["hidden_states"][-1]
+            hid_t = tree_map(lambda x: x.to("cuda"), hid_t_cpu)
             _, _, v_next, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
-                hidden_state=rollout["hidden_states"][-1],
+                # hidden_state=rollout["hidden_states"][-1],
+                hidden_state=hid_t,
                 stochastic=False,
                 taken_action=None
             )
