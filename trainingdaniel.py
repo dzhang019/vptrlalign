@@ -3,7 +3,6 @@ import pickle
 import time
 import threading
 import queue
-from collections import deque
 
 import gym
 import minerl
@@ -19,7 +18,7 @@ from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 
-th.autograd.set_detect_anomaly(False)  # Set to False to improve performance
+th.autograd.set_detect_anomaly(True)
 
 
 def load_model_parameters(path_to_model_file):
@@ -30,43 +29,34 @@ def load_model_parameters(path_to_model_file):
     return policy_kwargs, pi_head_kwargs
 
 
-class RolloutBuffer:
-    def __init__(self, max_size=10):
-        self.buffer = deque(maxlen=max_size)
-        self.lock = threading.Lock()
+# Simple thread-safe queue for passing rollouts between threads
+class RolloutQueue:
+    def __init__(self, maxsize=10):
+        self.queue = queue.Queue(maxsize=maxsize)
     
-    def add(self, rollout_batch):
-        with self.lock:
-            self.buffer.append(rollout_batch)
+    def put(self, rollouts):
+        self.queue.put(rollouts, block=True)
     
     def get(self):
-        with self.lock:
-            if len(self.buffer) == 0:
-                return None
-            return self.buffer.popleft()
+        return self.queue.get(block=True)
     
-    def size(self):
-        with self.lock:
-            return len(self.buffer)
+    def qsize(self):
+        return self.queue.qsize()
 
 
-def environment_worker(
-    agent, 
-    envs, 
-    rollout_steps, 
-    rollout_buffer, 
-    out_episodes,
-    stop_event,
-    death_penalty=-1000.0
-):
-    """Worker thread for environment stepping"""
+# Thread for stepping through environments and collecting rollouts
+def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, stop_flag):
     num_envs = len(envs)
     obs_list = [env.reset() for env in envs]
     done_list = [False] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
-    while not stop_event.is_set():
+    iteration = 0
+    while not stop_flag[0]:
+        iteration += 1
+        
+        # Initialize rollouts for each environment
         rollouts = [
             {
                 "obs": [],
@@ -82,9 +72,6 @@ def environment_worker(
         # Collect rollouts
         for step in range(rollout_steps):
             for env_i in range(num_envs):
-                if stop_event.is_set():
-                    return
-                
                 envs[env_i].render()
                 
                 if not done_list[env_i]:
@@ -101,11 +88,11 @@ def environment_worker(
                     
                     next_obs_i, env_reward_i, done_flag_i, info_i = envs[env_i].step(minerl_action_i)
                     if "error" in info_i:
-                        # print(f"[Env {env_i}] Error in info: {info_i['error']}")
+                        print(f"[Env {env_i}] Error in info: {info_i['error']}")
                         done_flag_i = True
                     
                     if done_flag_i:
-                        env_reward_i += death_penalty
+                        env_reward_i += -1000.0  # DEATH_PENALTY
                     
                     # Store rollout data
                     rollouts[env_i]["obs"].append(obs_list[env_i])
@@ -130,57 +117,50 @@ def environment_worker(
                         done_list[env_i] = False
                         hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
         
-        # Add completed rollouts to the buffer
-        rollout_buffer.add(rollouts)
+        # Send the collected rollouts to the training thread
+        print(f"[Environment Thread] Iteration {iteration} collected {rollout_steps} steps per env")
+        rollout_queue.put(rollouts)
 
 
-def train_worker(
-    agent,
-    pretrained_policy,
-    rollout_buffer,
-    stop_event,
-    gamma=0.9999,
-    lam=0.95,
-    learning_rate=3e-7,
-    max_grad_norm=1.0,
-    lambda_kl=50.0,
-    kl_decay=0.9995,
-    value_loss_coef=0.5
-):
-    """Worker thread for training updates"""
-    optimizer = th.optim.Adam(agent.policy.parameters(), lr=learning_rate)
+# Thread for training the agent
+def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
+    # Hyperparameters
+    LEARNING_RATE = 3e-7
+    MAX_GRAD_NORM = 1.0
+    LAMBDA_KL = 50.0
+    GAMMA = 0.9999
+    LAM = 0.95
+    VALUE_LOSS_COEF = 0.5
+    KL_DECAY = 0.9995
+    
+    # Setup optimizer
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
     running_loss = 0.0
     total_steps = 0
-    current_lambda_kl = lambda_kl
-    iteration = 0
     
-    while not stop_event.is_set():
-        # Wait for rollouts
-        rollouts = rollout_buffer.get()
-        if rollouts is None:
-            time.sleep(0.01)  # Small sleep to prevent CPU hogging
-            continue
-        
+    iteration = 0
+    while iteration < num_iterations and not stop_flag[0]:
         iteration += 1
-        # print(f"[Iteration {iteration}] Processing training batch...")
+        
+        # Wait for and get rollouts from environment thread
+        print(f"[Training Thread] Waiting for rollouts...")
+        rollouts = rollout_queue.get()
+        print(f"[Training Thread] Processing rollouts for iteration {iteration}")
         
         # Process rollouts
         transitions_all = []
-        for env_rollout in rollouts:
-            if len(env_rollout["obs"]) == 0:
-                continue
-                
+        for env_i, env_rollout in enumerate(rollouts):
             env_transitions = train_unroll(
                 agent,
                 pretrained_policy,
                 env_rollout,
-                gamma=gamma,
-                lam=lam
+                gamma=GAMMA,
+                lam=LAM
             )
             transitions_all.extend(env_transitions)
         
         if len(transitions_all) == 0:
-            # print(f"[Iteration {iteration}] No transitions collected, skipping update.")
+            print(f"[Training Thread] No transitions collected, skipping update.")
             continue
         
         # RL update
@@ -198,27 +178,26 @@ def train_worker(
             value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
             kl_loss = compute_kl_loss(cur_pd, old_pd)
             
-            total_loss_step = loss_rl + (value_loss_coef * value_loss) + (current_lambda_kl * kl_loss)
+            total_loss_step = loss_rl + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
             loss_list.append(total_loss_step.mean())
         
         total_loss_for_rollout = sum(loss_list) / len(loss_list)
         total_loss_for_rollout.backward()
-        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
+        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
         optimizer.step()
         
-        # Track stats
+        # Update stats
         total_loss_val = total_loss_for_rollout.item()
         running_loss += total_loss_val * len(transitions_all)
         total_steps += len(transitions_all)
         avg_loss = (running_loss / total_steps) if total_steps > 0 else 0.0
-        current_lambda_kl *= kl_decay
+        LAMBDA_KL *= KL_DECAY
         
-        print(f"[Iteration {iteration}] Loss={total_loss_val:.4f}, Steps={len(transitions_all)}, " 
-              f"TotalSteps={total_steps}, AvgLoss={avg_loss:.4f}, BufferSize={rollout_buffer.size()}")
+        print(f"[Training Thread] Iteration {iteration}/{num_iterations} Loss={total_loss_val:.4f}, "
+              f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
 
 
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
-    """Same as in original code, but moved to function for clarity"""
     transitions = []
     T = len(rollout["obs"])
     if T == 0:
@@ -287,41 +266,23 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     return transitions
 
 
-def train_rl_pipelined(
+def train_rl_threaded(
     in_model,
     in_weights,
     out_weights,
     out_episodes,
-    train_duration_minutes=30,
+    num_iterations=10,
     rollout_steps=40,
-    num_envs=4,
-    buffer_size=5,
-    **hyperparams
+    num_envs=2,
+    queue_size=3
 ):
     """
-    Pipelined version with separate threads for environment stepping and training
+    Minimally modified version with separate threads for environment stepping and training
     """
-    
-    # Default hyperparams
-    hp = {
-        "learning_rate": 3e-7,
-        "max_grad_norm": 1.0,
-        "lambda_kl": 50.0,
-        "gamma": 0.9999,
-        "lam": 0.95,
-        "death_penalty": -1000.0,
-        "value_loss_coef": 0.5,
-        "kl_decay": 0.9995,
-    }
-    hp.update(hyperparams)
-    
-    print("Initializing agents and environments...")
-    
-    # Create environments
+    # Create environments and agents
     dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
-    # Create agent and pretrained policy
     agent = MineRLAgent(
         dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
@@ -336,83 +297,54 @@ def train_rl_pipelined(
     )
     pretrained_policy.load_weights(in_weights)
     
-    # Verify no weight sharing
     for p1, p2 in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
         assert p1.data_ptr() != p2.data_ptr(), "Weights are shared!"
     
-    # Create parallel environments
+    # Create environments
     envs = [HumanSurvival(**ENV_KWARGS).make() for _ in range(num_envs)]
     
-    # Setup shared buffer and stop event
-    rollout_buffer = RolloutBuffer(max_size=buffer_size)
-    stop_event = threading.Event()
+    # Create a queue for passing rollouts between threads
+    rollout_queue = RolloutQueue(maxsize=queue_size)
     
-    # Start environment worker thread
+    # Shared flag to signal threads to stop
+    stop_flag = [False]
+    
+    # Create and start threads
     env_thread = threading.Thread(
-        target=environment_worker,
-        args=(
-            agent, 
-            envs, 
-            rollout_steps, 
-            rollout_buffer, 
-            out_episodes,
-            stop_event,
-            hp["death_penalty"]
-        )
+        target=environment_thread,
+        args=(agent, envs, rollout_steps, rollout_queue, out_episodes, stop_flag)
     )
     
-    # Start training worker thread
     train_thread = threading.Thread(
-        target=train_worker,
-        args=(
-            agent,
-            pretrained_policy,
-            rollout_buffer,
-            stop_event,
-        ),
-        kwargs={
-            "gamma": hp["gamma"],
-            "lam": hp["lam"],
-            "learning_rate": hp["learning_rate"],
-            "max_grad_norm": hp["max_grad_norm"],
-            "lambda_kl": hp["lambda_kl"],
-            "kl_decay": hp["kl_decay"],
-            "value_loss_coef": hp["value_loss_coef"]
-        }
+        target=training_thread,
+        args=(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations)
     )
     
-    print(f"Starting training for {train_duration_minutes} minutes...")
-    start_time = time.time()
+    print("Starting threads...")
     env_thread.start()
     train_thread.start()
     
     try:
-        # Run for specified duration
-        end_time = start_time + (train_duration_minutes * 60)
-        while time.time() < end_time:
-            time.sleep(5)  # Check every 5 seconds
-            elapsed_minutes = (time.time() - start_time) / 60
-            print(f"Training in progress... {elapsed_minutes:.1f}/{train_duration_minutes} minutes elapsed")
-    
+        # Wait for training thread to complete
+        train_thread.join()
     except KeyboardInterrupt:
-        print("Training interrupted by user.")
-    
+        print("Interrupted by user. Stopping threads...")
     finally:
-        # Cleanup
-        print("Stopping threads...")
-        stop_event.set()
+        # Signal threads to stop
+        stop_flag[0] = True
         
+        # Wait for threads to finish
         env_thread.join(timeout=10)
-        train_thread.join(timeout=10)
+        if env_thread.is_alive():
+            print("Warning: Environment thread did not terminate properly")
         
         # Close environments
         for env in envs:
             env.close()
         
+        # Save weights
         print(f"Saving fine-tuned weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
-        
-        print("Training complete!")
 
 
 if __name__ == "__main__":
@@ -421,26 +353,21 @@ if __name__ == "__main__":
     parser.add_argument("--in-weights", required=True, type=str)
     parser.add_argument("--out-weights", required=True, type=str)
     parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
-    parser.add_argument("--train-duration", required=False, type=int, default=30, 
-                        help="Training duration in minutes")
+    parser.add_argument("--num-iterations", required=False, type=int, default=10)
     parser.add_argument("--rollout-steps", required=False, type=int, default=40)
-    parser.add_argument("--num-envs", required=False, type=int, default=4)
-    parser.add_argument("--buffer-size", required=False, type=int, default=5,
-                        help="Size of rollout buffer between env and training threads")
-    parser.add_argument("--learning-rate", required=False, type=float, default=3e-7)
-    parser.add_argument("--lambda-kl", required=False, type=float, default=50.0)
+    parser.add_argument("--num-envs", required=False, type=int, default=2)
+    parser.add_argument("--queue-size", required=False, type=int, default=3,
+                        help="Size of the queue between environment and training threads")
 
     args = parser.parse_args()
 
-    train_rl_pipelined(
+    train_rl_threaded(
         in_model=args.in_model,
         in_weights=args.in_weights,
         out_weights=args.out_weights,
         out_episodes=args.out_episodes,
-        train_duration_minutes=args.train_duration,
+        num_iterations=args.num_iterations,
         rollout_steps=args.rollout_steps,
         num_envs=args.num_envs,
-        buffer_size=args.buffer_size,
-        learning_rate=args.learning_rate,
-        lambda_kl=args.lambda_kl
+        queue_size=args.queue_size
     )
