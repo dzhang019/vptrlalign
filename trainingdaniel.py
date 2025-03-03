@@ -122,8 +122,9 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
         rollout_queue.put(rollouts)
 
 
-# Thread for training the agent
+# Thread for training the agent - updated with batched implementation
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
+    """Training thread with batched processing for better GPU utilization"""
     # Hyperparameters
     LEARNING_RATE = 3e-7
     MAX_GRAD_NORM = 1.0
@@ -163,37 +164,46 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             print(f"[Training Thread] No transitions collected, skipping update.")
             continue
         
-        # RL update
-        optimizer.zero_grad()
-        loss_list = []
-        for t in transitions_all:
-            advantage = t["advantage"]
-            returns_ = t["return"]
-            log_prob = t["log_prob"]
-            v_pred_ = t["v_pred"]
-            cur_pd = t["cur_pd"]
-            old_pd = t["old_pd"]
-            
-            loss_rl = -(advantage * log_prob)
-            value_loss = (v_pred_ - th.tensor(returns_, device="cuda")) ** 2
-            kl_loss = compute_kl_loss(cur_pd, old_pd)
-            
-            total_loss_step = loss_rl + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
-            loss_list.append(total_loss_step.mean())
+        # OPTIMIZATION: Batch processing instead of individual transition processing
+        batch_advantages = th.cat([t["advantage"].unsqueeze(0) for t in transitions_all])
+        batch_returns = th.tensor([t["return"] for t in transitions_all], device="cuda")
+        batch_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in transitions_all])
+        batch_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in transitions_all])
         
-        total_loss_for_rollout = sum(loss_list) / len(loss_list)
-        total_loss_for_rollout.backward()
+        # Compute losses in batch
+        optimizer.zero_grad()
+        
+        # Policy loss (using negative log probability * advantages)
+        policy_loss = -(batch_advantages * batch_log_probs).mean()
+        
+        # Value function loss
+        value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
+        
+        # KL divergence loss - this needs to be handled separately
+        kl_losses = []
+        for t in transitions_all:
+            kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+            kl_losses.append(kl_loss)
+        kl_loss = th.stack(kl_losses).mean()
+        
+        # Total loss
+        total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+        
+        # Backpropagate
+        total_loss.backward()
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
         optimizer.step()
         
         # Update stats
-        total_loss_val = total_loss_for_rollout.item()
+        total_loss_val = total_loss.item()
         running_loss += total_loss_val * len(transitions_all)
         total_steps += len(transitions_all)
         avg_loss = (running_loss / total_steps) if total_steps > 0 else 0.0
         LAMBDA_KL *= KL_DECAY
         
-        print(f"[Training Thread] Iteration {iteration}/{num_iterations} Loss={total_loss_val:.4f}, "
+        print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
+              f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
+              f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
               f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
 
 
