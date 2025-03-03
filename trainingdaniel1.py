@@ -1,3 +1,30 @@
+from argparse import ArgumentParser
+import pickle
+import time
+
+import gym
+import minerl
+import torch as th
+import numpy as np
+
+from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
+from data_loader import DataLoader
+from lib.tree_util import tree_map
+
+from lib.height import reward_function
+from lib.policy_mod import compute_kl_loss
+from torchvision import transforms
+from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+
+th.autograd.set_detect_anomaly(True)
+
+def load_model_parameters(path_to_model_file):
+    agent_parameters = pickle.load(open(path_to_model_file, "rb"))
+    policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
+    pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
+    pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
+    return policy_kwargs, pi_head_kwargs
+
 def train_rl(
     in_model,
     in_weights,
@@ -352,3 +379,27 @@ def update_policy(agent, batch, optimizer, lambda_kl, value_loss_coef, max_grad_
     optimizer.step()
     
     return total_loss.item()
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--in-model", required=True, type=str)
+    parser.add_argument("--in-weights", required=True, type=str)
+    parser.add_argument("--out-weights", required=True, type=str)
+    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
+    parser.add_argument("--num-iterations", required=False, type=int, default=10)
+    parser.add_argument("--rollout-steps", required=False, type=int, default=40)
+    parser.add_argument("--num-envs", required=False, type=int, default=2)
+    parser.add_argument("--mini-batch-size", required=False, type=int, default=10)
+
+    args = parser.parse_args()
+
+    train_rl(
+        in_model=args.in_model,
+        in_weights=args.in_weights,
+        out_weights=args.out_weights,
+        out_episodes=args.out_episodes,
+        num_iterations=args.num_iterations,
+        rollout_steps=args.rollout_steps,
+        num_envs=args.num_envs,
+        mini_batch_size=args.mini_batch_size
+    )
