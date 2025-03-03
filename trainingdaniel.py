@@ -72,7 +72,8 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
         # Collect rollouts
         for step in range(rollout_steps):
             for env_i in range(num_envs):
-                envs[env_i].render()
+                if env_i == 0:
+                    envs[env_i].render()
                 
                 if not done_list[env_i]:
                     episode_step_counts[env_i] += 1
