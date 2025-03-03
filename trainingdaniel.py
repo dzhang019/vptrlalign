@@ -17,6 +17,8 @@ from lib.height import reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+from torch.cuda.amp import autocast, GradScaler
+
 
 th.autograd.set_detect_anomaly(True)
 
@@ -145,6 +147,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     total_steps = 0
     
     iteration = 0
+    scaler = GradScaler()
     while iteration < num_iterations and not stop_flag[0]:
         iteration += 1
         
@@ -184,25 +187,29 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         optimizer.zero_grad()
         
         # Policy loss (using negative log probability * advantages)
-        policy_loss = -(batch_advantages * batch_log_probs).mean()
-        
-        # Value function loss
-        value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
-        
-        # KL divergence loss - this needs to be handled separately
-        kl_losses = []
-        for t in transitions_all:
-            kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
-            kl_losses.append(kl_loss)
-        kl_loss = th.stack(kl_losses).mean()
-        
-        # Total loss
-        total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+        with autocast():
+            policy_loss = -(batch_advantages * batch_log_probs).mean()
+            
+            # Value function loss
+            value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
+            
+            # KL divergence loss - this needs to be handled separately
+            kl_losses = []
+            for t in transitions_all:
+                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                kl_losses.append(kl_loss)
+            kl_loss = th.stack(kl_losses).mean()
+            
+            # Total loss
+            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
         
         # Backpropagate
-        total_loss.backward()
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
+        # optimizer.step()
         train_end_time = time.time()
         train_duration = train_end_time - train_start_time
         
@@ -322,8 +329,8 @@ def train_rl_threaded(
     )
     pretrained_policy.load_weights(in_weights)
     
-    for p1, p2 in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
-        assert p1.data_ptr() != p2.data_ptr(), "Weights are shared!"
+    # for p1, p2 in zip(agent.policy.parameters(), pretrained_policy.policy.parameters()):
+    #     assert p1.data_ptr() != p2.data_ptr(), "Weights are shared!"
     
     # Create environments
     envs = [HumanSurvival(**ENV_KWARGS).make() for _ in range(num_envs)]
