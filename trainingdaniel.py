@@ -110,7 +110,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     
                     # Update state
                     obs_list[env_i] = next_obs_i
-                    hidden_states[env_i] = tree_map(lambda x: x.detach().cpu(), new_hid_i)
+                    hidden_states[env_i] = tree_map(lambda x: x.detach(), new_hid_i)
                     done_list[env_i] = done_flag_i
                     
                     if done_flag_i:
