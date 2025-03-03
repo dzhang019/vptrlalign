@@ -55,6 +55,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
     iteration = 0
     while not stop_flag[0]:
         iteration += 1
+        env_start_time = time.time()
         
         # Initialize rollouts for each environment
         rollouts = [
@@ -119,7 +120,10 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                         hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
         
         # Send the collected rollouts to the training thread
-        print(f"[Environment Thread] Iteration {iteration} collected {rollout_steps} steps per env")
+        env_end_time = time.time()
+        env_duration = env_end_time - env_start_time
+        print(f"[Environment Thread] Iteration {iteration} collected {rollout_steps} steps "
+              f"across {num_envs} envs in {env_duration:.3f}s")
         rollout_queue.put(rollouts)
 
 
@@ -144,9 +148,14 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     while iteration < num_iterations and not stop_flag[0]:
         iteration += 1
         
-        # Wait for and get rollouts from environment thread
+        
         print(f"[Training Thread] Waiting for rollouts...")
+        wait_start_time = time.time()
         rollouts = rollout_queue.get()
+        wait_end_time = time.time()
+        wait_duration = wait_end_time - wait_start_time
+        print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+        train_start_time = time.time()
         print(f"[Training Thread] Processing rollouts for iteration {iteration}")
         
         # Process rollouts
@@ -194,6 +203,11 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         total_loss.backward()
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
         optimizer.step()
+        train_end_time = time.time()
+        train_duration = train_end_time - train_start_time
+        
+        print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
+              f"to process and train on {len(transitions_all)} transitions.")
         
         # Update stats
         total_loss_val = total_loss.item()
