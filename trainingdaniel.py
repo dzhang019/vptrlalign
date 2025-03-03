@@ -166,7 +166,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             continue
         
         # OPTIMIZATION: Batch processing instead of individual transition processing
-        batch_advantages = th.cat([t["advantage"].unsqueeze(0) for t in transitions_all])
+        batch_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in transitions_all])
         batch_returns = th.tensor([t["return"] for t in transitions_all], device="cuda")
         batch_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in transitions_all])
         batch_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in transitions_all])
