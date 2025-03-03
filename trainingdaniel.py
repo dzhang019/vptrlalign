@@ -104,13 +104,13 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["rewards"].append(env_reward_i)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
-                        tree_map(lambda x: x.detach(), hidden_states[env_i])
+                        tree_map(lambda x: x.detach().cpu(), hidden_states[env_i])
                     )
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
                     # Update state
                     obs_list[env_i] = next_obs_i
-                    hidden_states[env_i] = tree_map(lambda x: x.detach(), new_hid_i)
+                    hidden_states[env_i] = tree_map(lambda x: x.detach().cpu(), new_hid_i)
                     done_list[env_i] = done_flag_i
                     
                     if done_flag_i:
@@ -240,7 +240,9 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         act_t = rollout["actions"][t]
         rew_t = rollout["rewards"][t]
         done_t = rollout["dones"][t]
-        hid_t = rollout["hidden_states"][t]
+        # hid_t = rollout["hidden_states"][t]
+        hid_t_cpu = rollout["hidden_states"][t]
+        hid_t = tree_map(lambda x: x.to("cuda"), hid_t_cpu)
         next_obs_t = rollout["next_obs"][t]
 
         minerl_action, pi_dist, v_pred, log_prob, hid_out = agent.get_action_and_training_info(
