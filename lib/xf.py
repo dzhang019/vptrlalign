@@ -13,27 +13,34 @@ from lib import torch_util as tu
 from lib import util
 
 SENTINEL = 0.1337
-
-def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None, check_sentinel=False, use_muP_factor=False):
-    # print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+def attention(
+    Q_bte,
+    K_bTe,
+    V_bTe,
+    dtype,
+    mask=True,
+    extra_btT=None,
+    maxlen=None,
+    check_sentinel=False,
+    use_muP_factor=False,
+):
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
     
     # Check for mismatch in query and key sequence lengths
-    # Only truncate during training, not during environment stepping
     truncated = False
     if t != T and t == 1 and T > 1:
         # This is the case where we're in step-by-step mode (t=1) with a large context (T>1)
         # In this case, we shouldn't truncate K as it's intentionally longer for context
-        # print(f"Single-step attention with context: Q={t}, K={T}")
+        print(f"Single-step attention with context: Q={t}, K={T}")
         truncated = False
     elif t != T and t > 1 and T > t:
         # This is the case where we're in batch mode but K is larger than Q
         # Only in this case should we truncate
-        # print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
+        print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
         K_bTe = K_bTe[:, -t:, :]
         V_bTe = V_bTe[:, -t:, :]
-        # print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
+        print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
         truncated = True
     
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
@@ -43,9 +50,10 @@ def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None
         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
     
+    # Critical fix: Use isinstance instead of just "if mask:"
     if isinstance(mask, th.Tensor):
         bias = (~mask).float() * -1e9
-    elif mask:
+    elif isinstance(mask, bool) and mask:  # Explicitly check if mask is a boolean True
         # Use the original sequence lengths for bias calculation
         bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
     else:
@@ -53,9 +61,8 @@ def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None
     
     if extra_btT is not None:
         # Only handle dimension matching if we actually have a shape mismatch
-        if bias.shape[1] != extra_btT.shape[1] or bias.shape[2] != extra_btT.shape[2]:
-            # Create a safe bias tensor of the right dimensions
-            if isinstance(bias, th.Tensor) and bias.dim() > 0:
+        if isinstance(bias, th.Tensor) and bias.dim() > 0:
+            if bias.shape[1] != extra_btT.shape[1] or bias.shape[2] != extra_btT.shape[2]:
                 # Handle dimension 1 mismatch (batch sequence length)
                 if bias.shape[1] != extra_btT.shape[1]:
                     if bias.shape[1] == 1:
@@ -74,6 +81,85 @@ def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None
                     extra_btT = extra_btT[:, :, :min_dim2]
         
         bias = bias + extra_btT
+    
+    # Compute attention
+    logit_btT = th.baddbmm(
+        bias,
+        Q_bte.float(),
+        K_bTe.float().transpose(-1, -2),
+        alpha=(1 / e) if use_muP_factor else (1 / math.sqrt(e)),
+    )
+    
+    if check_sentinel:
+        logit_btT = logit_btT - 1e9 * invalid.float()
+    
+    W_btT = th.softmax(logit_btT, dim=2).to(dtype)
+    
+    if callable(V_bTe):
+        V_bTe = V_bTe()
+    
+    A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
+    return A_bte
+# def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None, check_sentinel=False, use_muP_factor=False):
+#     # print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+#     b, t, e = Q_bte.shape
+#     _, T, _ = K_bTe.shape
+    
+#     # Check for mismatch in query and key sequence lengths
+#     # Only truncate during training, not during environment stepping
+#     truncated = False
+#     if t != T and t == 1 and T > 1:
+#         # This is the case where we're in step-by-step mode (t=1) with a large context (T>1)
+#         # In this case, we shouldn't truncate K as it's intentionally longer for context
+#         # print(f"Single-step attention with context: Q={t}, K={T}")
+#         truncated = False
+#     elif t != T and t > 1 and T > t:
+#         # This is the case where we're in batch mode but K is larger than Q
+#         # Only in this case should we truncate
+#         # print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
+#         K_bTe = K_bTe[:, -t:, :]
+#         V_bTe = V_bTe[:, -t:, :]
+#         # print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
+#         truncated = True
+    
+#     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
+#     e = Q_bte.shape[2]
+    
+#     if check_sentinel:
+#         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
+#         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
+    
+#     if isinstance(mask, th.Tensor):
+#         bias = (~mask).float() * -1e9
+#     elif mask:
+#         # Use the original sequence lengths for bias calculation
+#         bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
+#     else:
+#         bias = Q_bte.new_zeros((), dtype=th.float32)
+    
+#     if extra_btT is not None:
+#         # Only handle dimension matching if we actually have a shape mismatch
+#         if bias.shape[1] != extra_btT.shape[1] or bias.shape[2] != extra_btT.shape[2]:
+#             # Create a safe bias tensor of the right dimensions
+#             if isinstance(bias, th.Tensor) and bias.dim() > 0:
+#                 # Handle dimension 1 mismatch (batch sequence length)
+#                 if bias.shape[1] != extra_btT.shape[1]:
+#                     if bias.shape[1] == 1:
+#                         bias = bias.expand(-1, extra_btT.shape[1], -1)
+#                     elif extra_btT.shape[1] == 1:
+#                         extra_btT = extra_btT.expand(-1, bias.shape[1], -1)
+#                     else:
+#                         min_dim1 = min(bias.shape[1], extra_btT.shape[1])
+#                         bias = bias[:, :min_dim1, :]
+#                         extra_btT = extra_btT[:, :min_dim1, :]
+                
+#                 # Handle dimension 2 mismatch (sequence length)
+#                 if bias.shape[2] != extra_btT.shape[2]:
+#                     min_dim2 = min(bias.shape[2], extra_btT.shape[2])
+#                     bias = bias[:, :, :min_dim2]
+#                     extra_btT = extra_btT[:, :, :min_dim2]
+        
+#         bias = bias + extra_btT
     
     # Handle bias shape for baddbmm operation
     if isinstance(bias, th.Tensor) and bias.dim() > 0:

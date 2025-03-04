@@ -4,7 +4,7 @@ import time
 import threading
 import queue
 
-import torch.profiler
+#import torch.profiler
 import gym
 import minerl
 import torch as th
@@ -153,7 +153,6 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
     running_loss = 0.0
     total_steps = 0
-    max_profile_iters = 5
     iteration = 0
     scaler = GradScaler()
     max_profile_iters = 5  # how many iterations we record
