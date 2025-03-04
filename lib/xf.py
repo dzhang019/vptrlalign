@@ -378,17 +378,30 @@ class SelfAttentionLayer(AttentionLayerBase):
         out_bte, _state = self.forward(X_bte, None)
         return out_bte
 
+    # def update_state(self, state, K_bte, V_bte):
+    #     def append(prev, new):
+    #         tprev = prev.shape[1]
+    #         startfull = max(tprev - self.cache_keep_len, 0)
+    #         full = th.cat([prev[:, startfull:], new], dim=1)
+    #         outstate = full[:, max(full.shape[1] - self.cache_keep_len, 0):]
+    #         return outstate, full
+    #     instate_K, instate_V = state
+    #     outstate_K, K_bte = append(instate_K, K_bte)
+    #     outstate_V, V_bte = append(instate_V, V_bte)
+    #     assert outstate_K.shape[-2] <= self.cache_keep_len
+    #     return (outstate_K, outstate_V), K_bte, V_bte
     def update_state(self, state, K_bte, V_bte):
         def append(prev, new):
             tprev = prev.shape[1]
-            startfull = max(tprev - self.cache_keep_len, 0)
+            startfull = max(tprev - self.maxlen, 0)
             full = th.cat([prev[:, startfull:], new], dim=1)
-            outstate = full[:, max(full.shape[1] - self.cache_keep_len, 0):]
+            outstate = full[:, max(full.shape[1] - self.maxlen, 0):]
+            print(f"Truncated cache: prev shape = {prev.shape}, new shape = {new.shape}, outstate shape = {outstate.shape}")
             return outstate, full
         instate_K, instate_V = state
         outstate_K, K_bte = append(instate_K, K_bte)
         outstate_V, V_bte = append(instate_V, V_bte)
-        assert outstate_K.shape[-2] <= self.cache_keep_len
+        assert outstate_K.shape[-2] <= self.maxlen
         return (outstate_K, outstate_V), K_bte, V_bte
 
     def initial_state(self, batchsize, initial_T=0):
