@@ -105,7 +105,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["rewards"].append(env_reward_i)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().cpu().contiguous, hidden_states[env_i])
+                        tree_map(lambda x: x.detach().cpu(), hidden_states[env_i])
                     )
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
