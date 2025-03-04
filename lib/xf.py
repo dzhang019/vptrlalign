@@ -39,6 +39,12 @@ def attention(
     """
     print("xf.py: Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
     print("xf.py: K_bTe shape:", K_bTe.shape)  
+    q_len = Q_bte.shape[1]
+    k_len = K_bTe.shape[1]
+    if k_len > q_len and mask:
+        # Keep only the most recent k_len positions
+        K_bTe = K_bTe[:, -q_len:, :]
+        V_bTe = V_bTe[:, -q_len:, :]
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
     if check_sentinel:
@@ -392,22 +398,26 @@ class SelfAttentionLayer(AttentionLayerBase):
     #     return (outstate_K, outstate_V), K_bte, V_bte
     def update_state(self, state, K_bte, V_bte):
         def append(prev, new):
-            tprev = prev.shape[1]
-            # Calculate how many steps to keep from the previous cache
-            keep_steps = min(tprev, self.maxlen - new.shape[1])
-            # Keep the most recent `keep_steps` from the previous cache
-            prev_truncated = prev[:, -keep_steps:] if keep_steps > 0 else prev.new_zeros((prev.shape[0], 0, prev.shape[2]))
-            # Concatenate the truncated previous cache with the new keys/values
-            full = th.cat([prev_truncated, new], dim=1)
-            # Ensure the output cache does not exceed maxlen
-            outstate = full[:, -self.maxlen:]
-            print(f"Truncated cache: prev shape = {prev.shape}, new shape = {new.shape}, outstate shape = {outstate.shape}")
-            return outstate, full
+            # Calculate full sequence length after concatenation
+            full_length = prev.shape[1] + new.shape[1]
+            
+            # If concatenating would exceed maxlen, drop oldest entries
+            if full_length > self.maxlen:
+                # Keep exactly maxlen timesteps after concatenation
+                prev = prev[:, -(self.maxlen - new.shape[1]):]
+            
+            # Concatenate
+            full = th.cat([prev, new], dim=1)
+            
+            # Ensure we don't exceed maxlen
+            assert full.shape[1] <= self.maxlen, f"Sequence too long: {full.shape[1]} > {self.maxlen}"
+            
+            return full, full
 
         instate_K, instate_V = state
         outstate_K, K_bte = append(instate_K, K_bte)
         outstate_V, V_bte = append(instate_V, V_bte)
-        assert outstate_K.shape[-2] <= self.maxlen
+        
         return (outstate_K, outstate_V), K_bte, V_bte
 
     def initial_state(self, batchsize, initial_T=0):
