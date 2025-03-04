@@ -393,11 +393,17 @@ class SelfAttentionLayer(AttentionLayerBase):
     def update_state(self, state, K_bte, V_bte):
         def append(prev, new):
             tprev = prev.shape[1]
-            startfull = max(tprev - self.maxlen, 0)
-            full = th.cat([prev[:, startfull:], new], dim=1)
-            outstate = full[:, max(full.shape[1] - self.maxlen, 0):]
+            # Calculate how many steps to keep from the previous cache
+            keep_steps = min(tprev, self.maxlen - new.shape[1])
+            # Keep the most recent `keep_steps` from the previous cache
+            prev_truncated = prev[:, -keep_steps:] if keep_steps > 0 else prev.new_zeros((prev.shape[0], 0, prev.shape[2]))
+            # Concatenate the truncated previous cache with the new keys/values
+            full = th.cat([prev_truncated, new], dim=1)
+            # Ensure the output cache does not exceed maxlen
+            outstate = full[:, -self.maxlen:]
             print(f"Truncated cache: prev shape = {prev.shape}, new shape = {new.shape}, outstate shape = {outstate.shape}")
             return outstate, full
+
         instate_K, instate_V = state
         outstate_K, K_bte = append(instate_K, K_bte)
         outstate_V, V_bte = append(instate_V, V_bte)
