@@ -395,6 +395,7 @@ class MinecraftAgentPolicy(nn.Module):
         # 2) Forward pass
         (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
 
+
         # 3) Choose action: either sample or use forced `taken_action`
         if taken_action is None:
             ac = self.pi_head.sample(pd, deterministic=not stochastic)
@@ -421,80 +422,34 @@ class MinecraftAgentPolicy(nn.Module):
 
         return ac, state_out, result
     def act_train_sequence(self, obs_sequence, hidden_state, forced_actions=None, stochastic=True):
-        """
-        Multi-step forward pass for a recurrent/transformer policy in 'train' mode.
-
-        Args:
-        obs_sequence: e.g. {"img": Tensor shape [T, C, H, W]}
-        hidden_state: initial hidden state for step=0
-        forced_actions: list of T dicts, each has {"buttons":..., "camera":...} if you want forced actions
-        stochastic: whether to sample if forced_actions is None
-
-        Returns:
-        pi_dist_seq: distribution for each time step (list or a single structure shaped [T, ...])
-        vpred_seq: value predictions for each time step, shape [T]
-        log_prob_seq: log-prob for each forced or sampled action, shape [T]
-        final_hidden_state
-        """
-
-        # 1) Expand dims to indicate batch=1 if needed
-        #    Suppose we treat the entire sequence as batch=1, time=T
-        #    So shape: obs_sequence["img"] is [T, C, H, W]. We can add a batch dimension => [1, T, C, H, W]
-        seq_img = obs_sequence["img"].unsqueeze(0)  # shape [1, T, C, H, W]
-        print(seq_img.shape)
-        # 2) Build 'first' mask if needed. If you track the first step in each rollout, something like:
-        #    first_mask = th.zeros(T, dtype=th.bool, device=self.device)
-        #    first_mask[0] = True
-        #    first_mask = first_mask.unsqueeze(0) # shape [1, T]
-        # or skip if you don't rely on it
-        first_mask = th.zeros(seq_img.shape[1], dtype=th.bool, device=seq_img.device)
+        seq_img = obs_sequence["img"].unsqueeze(0)  # [1, T, C, H, W]
+        T = seq_img.shape[1]
+        first_mask = th.zeros(T, dtype=th.bool, device=seq_img.device)
         first_mask[0] = True
-        first_mask = first_mask.unsqueeze(0)  # shape [1, T]
-        print(first_mask.shape)
-        # 3) Forward pass through your model
-        # self(...) expects shape [B, T, ...], so pass (seq_img, first=first_mask, state_in=hidden_state)
+        first_mask = first_mask.unsqueeze(0)  # [1, T]
+
         (pd_seq, vpred_seq, _), state_out = self(
-            obs={"img": seq_img},   # pass the dictionary
+            obs={"img": seq_img},
             first=first_mask,
             state_in=hidden_state
         )
-        print(pd_seq.shape, vpred_seq.shape)
-        # pd_seq shape: [B=1, T, ...], vpred_seq shape: [B=1, T, ...]
 
-        # 4) If forced_actions is given, compute log_prob of them stepwise
-        #    or if forced_actions is None, sample an action for each step
-        T = seq_img.shape[1]
         log_prob_seq = []
         if forced_actions is not None:
-            # forced_actions is a list of length T, each is a dict of Torch tensors
-            # We'll pack them into shape [1, T, ...] so we can do a single call to pi_head.logprob
-            # or do it step by step
-            pass
-            # For simplicity, do it step by step in a loop (still less overhead than a full forward each time):
-            for t in range(T):
-                # forced_actions[t] has shape [1, ...], or we can shape it so it's [B=1, T=1, ...]
-                # We'll just do a single-step call to pi_head.logprob but reusing pd_seq[:, t].
-                # We slice out pd for time t: 
-                pd_t = tree_map(lambda x: x[:, t], pd_seq)  # shape [B=1, ...]
-                action_t = forced_actions[t]
-                # reshape forced action if needed
-
-                # compute log_prob
-                log_prob_2d = self.pi_head.logprob(tree_map(lambda x: x, action_t), pd_t)  # shape [1, 1] ?
-                log_prob_1d = log_prob_2d[:, 0].clone()
-                log_prob_seq.append(log_prob_1d)
-            log_prob_seq = th.cat(log_prob_seq, dim=0)  # shape [T]
+            # Stack actions to [1, T, ...] for batch processing
+            buttons = th.stack([fa["buttons"] for fa in forced_actions], dim=1)  # [1, T, ...]
+            camera = th.stack([fa["camera"] for fa in forced_actions], dim=1)    # [1, T, ...]
+            ac_seq = {"buttons": buttons, "camera": camera}
+            log_prob_2d = self.pi_head.logprob(ac_seq, pd_seq)  # [1, T]
+            log_prob_seq = log_prob_2d[0]  # [T]
         else:
-            # we sample for each step from pd_seq. Let's do it in a small loop or a single sampling method
-            # Alternatively, a more advanced approach can do it all at once. For example:
-            # ac_seq = self.pi_head.sample(pd_seq, deterministic=not stochastic)
-            # log_prob_seq = ...
-            pass
+            # Sampling case (incomplete in your code)
+            ac_seq = self.pi_head.sample(pd_seq, deterministic=not stochastic)  # [1, T, ...]
+            log_prob_2d = self.pi_head.logprob(ac_seq, pd_seq)  # [1, T]
+            log_prob_seq = log_prob_2d[0]  # [T]
 
-        # 5) Denormalize vpred_seq => shape [1, T]
-        vpred_seq = self.value_head.denormalize(vpred_seq)[0]   # shape [T]
-        # 6) We can clone pd_seq for each step if we want to store distributions. Or return them as is
-        pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)  # shape [T, ...] after removing batch dim
+        vpred_seq = self.value_head.denormalize(vpred_seq)[0]  # [T]
+        pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)     # [T, ...]
 
         return pd_seq, vpred_seq, log_prob_seq, state_out
 

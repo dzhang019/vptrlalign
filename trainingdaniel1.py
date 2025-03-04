@@ -248,51 +248,42 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     if T == 0:
         return transitions
     
-    obs_seq = rollout["obs"]            # list of T obs
-    act_seq = rollout["actions"]        # list of T actions
+    obs_seq = rollout["obs"]
+    act_seq = rollout["actions"]
     hidden_states_seq = rollout["hidden_states"]
 
-    #initial_hidden_state = tree_map(lambda x: x.to(agent.device), rollout["hidden_states"][0])
-    initial_hidden = tree_map(lambda x: x.to("cuda").contiguous(), hidden_states_seq[0])
     pi_dist_seq, vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
-        initial_hidden_state=initial_hidden,  # or however you do it
+        initial_hidden_state=hidden_states_seq[0],
         stochastic=False,
-        taken_actions_list=act_seq  # if you want logprob for forced actions
+        taken_actions_list=act_seq
     )
     old_pi_dist_seq, old_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
-        minerl_obs_list=rollout["obs"],
-        initial_hidden_state=pretrained_policy.policy.initial_state(1),  # or however you handle hidden state
+        minerl_obs_list=obs_seq,
+        initial_hidden_state=pretrained_policy.policy.initial_state(1),
         stochastic=False,
-        taken_actions_list=rollout["actions"]
+        taken_actions_list=act_seq
     )
 
     for t in range(T):
-        obs_t = rollout["obs"][t]
-        act_t = rollout["actions"][t]
-        rew_t = rollout["rewards"][t]
-        done_t = rollout["dones"][t]
-        next_obs_t = rollout["next_obs"][t]
-
         transitions.append({
-            "obs": obs_t,
-            "action": act_t,
-            "reward": rew_t,
-            "done": done_t,
-            "v_pred": vpred_seq[t],
-            "log_prob": log_prob_seq[t],
-            "cur_pd": pi_dist_seq,
-            "old_pd": old_pi_dist_seq,
-            "next_obs": next_obs_t
+            "obs": rollout["obs"][t],
+            "action": rollout["actions"][t],
+            "reward": rollout["rewards"][t],
+            "done": rollout["dones"][t],
+            "v_pred": vpred_seq[t],        # Now [T], so index directly
+            "log_prob": log_prob_seq[t],    # Now [T]
+            "cur_pd": pi_dist_seq[t],       # Now [T, ...]
+            "old_pd": old_pi_dist_seq[t],   # Now [T, ...]
+            "next_obs": rollout["next_obs"][t]
         })
 
+    # Bootstrap and GAE calculation remain the same
     if not transitions[-1]["done"]:
         with th.no_grad():
-            hid_t_cpu = rollout["hidden_states"][-1]
-            hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
+            hid_t = tree_map(lambda x: x.to("cuda"), rollout["hidden_states"][-1])
             _, _, v_next, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
-                # hidden_state=rollout["hidden_states"][-1],
                 hidden_state=hid_t,
                 stochastic=False,
                 taken_action=None
@@ -308,7 +299,6 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         done_i = transitions[i]["done"]
         mask = 1.0 - float(done_i)
         next_val = bootstrap_value if i == T - 1 else transitions[i+1]["v_pred"].item()
-
         delta = r_i + gamma * next_val * mask - v_i
         gae = delta + gamma * lam * mask * gae
         transitions[i]["advantage"] = gae
