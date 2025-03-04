@@ -24,7 +24,7 @@ def attention(
     check_sentinel=False,
     use_muP_factor=False,
 ):
-    """Simplified attention with detailed debugging"""
+    """Fixed attention function with correct tensor handling"""
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
     
@@ -41,9 +41,19 @@ def attention(
     # Update T after possible truncation
     T = K_bTe.shape[1]
     
+    # CRITICAL CHANGE: Always create bias with shape matching Q and K
     if isinstance(mask, th.Tensor):
         print(f"DEBUG: Mask is a tensor with shape {mask.shape}")
-        bias = (~mask).float() * -1e9
+        # Create new bias with the right shape, ignoring the input mask
+        bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
+        
+        # Copy as much as possible from the mask
+        min_rows = min(mask.shape[1], t)
+        min_cols = min(mask.shape[2], T)
+        mask_slice = ~mask[:, :min_rows, :min_cols]
+        
+        # Set the copied part
+        bias[:, :min_rows, :min_cols] = mask_slice.float() * -1e9
     elif isinstance(mask, bool) and mask:
         print("DEBUG: Creating causal mask manually")
         # Create causal mask manually (lower triangular)
@@ -60,31 +70,26 @@ def attention(
     
     if extra_btT is not None:
         print(f"DEBUG: extra_btT provided with shape: {extra_btT.shape}")
-        print(f"DEBUG: bias shape: {bias.shape}, extra_btT shape: {extra_btT.shape}")
         
-        # CRITICAL FIX: Make sure extra_btT matches bias exactly
-        extra_btT_clone = extra_btT.clone()  # Make a copy to avoid modifying original
+        # Create a new extra_btT with the right shape (matching bias exactly)
+        new_extra = th.zeros_like(bias)
         
-        if extra_btT_clone.shape != bias.shape:
-            print(f"DEBUG: Shapes don't match, creating new tensor")
-            # Create a new tensor with exactly the same shape as bias
-            new_extra = th.zeros_like(bias, device=extra_btT_clone.device)
-            
-            # Only copy the overlapping part
-            min_b = min(extra_btT_clone.shape[0], bias.shape[0])
-            min_t = min(extra_btT_clone.shape[1], bias.shape[1])
-            min_T = min(extra_btT_clone.shape[2], bias.shape[2])
-            
-            # Careful slicing to copy only what fits
-            new_extra[:min_b, :min_t, :min_T] = extra_btT_clone[:min_b, :min_t, :min_T]
-            extra_btT = new_extra
+        # Copy as much as possible
+        min_rows = min(extra_btT.shape[1], bias.shape[1])
+        min_cols = min(extra_btT.shape[2], bias.shape[2])
         
-        print(f"DEBUG: Final bias shape: {bias.shape}, extra_btT shape: {extra_btT.shape}")
-        assert bias.shape == extra_btT.shape, "Shapes still don't match after adjustment!"
+        # Set the copied part
+        new_extra[:, :min_rows, :min_cols] = extra_btT[:, :min_rows, :min_cols]
+        extra_btT = new_extra
         
+        print(f"DEBUG: Final extra_btT shape: {extra_btT.shape}")
         bias = bias + extra_btT
     
     print(f"DEBUG: Final bias shape before baddbmm: {bias.shape}")
+    print(f"DEBUG: Q shape: {Q_bte.shape}, K.T shape: {K_bTe.transpose(-1, -2).shape}")
+    
+    # Double-check dimensions are compatible before baddbmm
+    assert bias.shape[2] == K_bTe.shape[1], f"Bias col dim ({bias.shape[2]}) must match K row dim ({K_bTe.shape[1]})"
     
     # Compute attention with scaled dot product
     logit_btT = th.baddbmm(
