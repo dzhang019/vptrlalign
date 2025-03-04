@@ -107,7 +107,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["hidden_states"].append(
                         tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_i])
                     )
-                    print(f"Stored hidden state: keys shape = {hidden_states[env_i][0].shape}, values shape = {hidden_states[env_i][1].shape}")
+                    #print(f"Stored hidden state: keys shape = {hidden_states[env_i][0].shape}, values shape = {hidden_states[env_i][1].shape}")
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
                     # Update state
