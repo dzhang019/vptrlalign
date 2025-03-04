@@ -37,8 +37,8 @@ def attention(
     All keys where every value is equal to the constant SENTINEL will be ignored.
     Currently this is only used by StridedAttn.
     """
-    print("xf.py: Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
-    print("xf.py: K_bTe shape:", K_bTe.shape)  
+    # print("xf.py: Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
+    # print("xf.py: K_bTe shape:", K_bTe.shape)  
     
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
@@ -48,7 +48,7 @@ def attention(
         # Truncate K and V to maxlen
         K_bTe = K_bTe[:, -maxlen:, :]
         V_bTe = V_bTe[:, -maxlen:, :]
-        print(f"Truncated K_bTe to shape: {K_bTe.shape}")
+        # print(f"Truncated K_bTe to shape: {K_bTe.shape}")
     if check_sentinel:
         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
@@ -56,17 +56,17 @@ def attention(
         bias = (~mask).float() * -1e9
     elif mask:
         bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
-        print("xf.py: Bias from get_attn_bias_cached shape:", bias.shape)
+        # print("xf.py: Bias from get_attn_bias_cached shape:", bias.shape)
     else:
         bias = Q_bte.new_zeros((), dtype=th.float32)
     if extra_btT is not None:
-        print("xf.py: bias shape before addition:", bias.shape)
-        print("xf.py: extra_btT shape:", extra_btT.shape)
+        # print("xf.py: bias shape before addition:", bias.shape)
+        # print("xf.py: extra_btT shape:", extra_btT.shape)
         if bias.shape[2] != extra_btT.shape[2]:
             # Option 1: Truncate bias to match extra_btT
             if bias.shape[2] > extra_btT.shape[2]:
                 bias = bias[:, :, :extra_btT.shape[2]]
-                print(f"Truncated bias to: {bias.shape}")
+                # print(f"Truncated bias to: {bias.shape}")
         bias = bias + extra_btT
     logit_btT = th.baddbmm(
         bias,
@@ -344,27 +344,27 @@ class SelfAttentionLayer(AttentionLayerBase):
         X_in = X_bte.clone()
         # Apply layer norm on a clone of the input.
         X_ln = self.ln_x(X_bte.clone())
-        print(f"xf.py (residual): X_bte shape: {X_bte.shape}")
-        print(f"xf.py (residual): X_ln shape: {X_ln.shape}")
+        # print(f"xf.py (residual): X_bte shape: {X_bte.shape}")
+        # print(f"xf.py (residual): X_ln shape: {X_ln.shape}")
         # Pass clones of X_ln to each linear layer to avoid in-place modifications.
         Q_bte = self.q_layer(X_ln.clone())
         K_bte = self.k_layer(X_ln.clone())
         V_bte = self.v_layer(X_ln.clone())
-        print(f"xf.py (residual): Q_bte shape: {Q_bte.shape}")
-        print(f"xf.py (residual): K_bte shape: {K_bte.shape}")
-        print(f"xf.py (residual): V_bte shape: {V_bte.shape}")
+        # print(f"xf.py (residual): Q_bte shape: {Q_bte.shape}")
+        # print(f"xf.py (residual): K_bte shape: {K_bte.shape}")
+        # print(f"xf.py (residual): V_bte shape: {V_bte.shape}")
         
         if state:
             state, K_bte, V_bte = self.update_state(state, K_bte, V_bte)
-            print(f"Updated state: keys shape = {state[0].shape}, values shape = {state[1].shape}")
+            # print(f"Updated state: keys shape = {state[0].shape}, values shape = {state[1].shape}")
         
         postproc_closure, Q_bte, K_bte, V_bte = self.attn.preproc_qkv(Q_bte, K_bte, V_bte)
         extra_btT = self.relattn_logits(X_ln, K_bte.shape[1]) if self.relattn else None
-        print(f"Q_bte (post-preproc) shape: {Q_bte.shape}")
-        print(f"K_bte (post-preproc) shape: {K_bte.shape}")
-        print(f"V_bte (post-preproc) shape: {V_bte.shape}")
+        # print(f"Q_bte (post-preproc) shape: {Q_bte.shape}")
+        # print(f"K_bte (post-preproc) shape: {K_bte.shape}")
+        # print(f"V_bte (post-preproc) shape: {V_bte.shape}")
         if extra_btT is not None:
-            print(f"extra_btT shape: {extra_btT.shape}")
+            # print(f"extra_btT shape: {extra_btT.shape}")
         A_bte = attention(
             Q_bte,
             K_bte,
@@ -378,7 +378,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         )
         A_bte = postproc_closure(A_bte)
         Aproj_bte = self.proj_layer(A_bte)
-        print(f"Aproj_bte shape: {Aproj_bte.shape}")
+        # print(f"Aproj_bte shape: {Aproj_bte.shape}")
         # Return the residual projection.
         return Aproj_bte, state
 
@@ -434,7 +434,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         # )
         keys = tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype)
         values = tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype)
-        print(f"Initialized cache: keys shape = {keys.shape}, values shape = {values.shape}")
+        # print(f"Initialized cache: keys shape = {keys.shape}, values shape = {values.shape}")
         return keys, values
 
     def empty_state(self):
