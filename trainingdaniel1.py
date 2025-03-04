@@ -252,9 +252,10 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]        # list of T actions
     hidden_states_seq = rollout["hidden_states"]
 
+    initial_hidden_state = tree_map(lambda x: x.to(agent.device), rollout["hidden_states"][0])
     pi_dist_seq, vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
-        initial_hidden_state=hidden_states_seq[0],  # or however you do it
+        initial_hidden_state=initial_hidden_state,  # or however you do it
         stochastic=False,
         taken_actions_list=act_seq  # if you want logprob for forced actions
     )
