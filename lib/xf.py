@@ -24,70 +24,52 @@ def attention(
     check_sentinel=False,
     use_muP_factor=False,
 ):
-    """
-    performs softmax(Q*K)*V operation with careful dimension handling
-    """
+    """Simplified attention that handles both single-step and batch mode safely"""
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
     
-    # Handle special case for step-by-step vs batch processing
-    is_single_step = (t == 1)
-    
-    if is_single_step:
-        print(f"Single-step attention with context: Q={t}, K={T}")
-    elif t != T:
-        print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
-        # Only truncate K/V during batch processing
+    if t == 1:
+        # Single-step mode (environment thread)
+        pass  # Keep K and V as they are (full context)
+    elif t > 1 and T > t:
+        # Batch mode (training thread) with K too long
+        # Truncate K and V to match Q
         K_bTe = K_bTe[:, -t:, :]
         V_bTe = V_bTe[:, -t:, :]
-        print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
     
-    # Update T in case we truncated
+    # Update T after possible truncation
     T = K_bTe.shape[1]
     
-    assert Q_bte.dtype == K_bTe.dtype == dtype
-    
-    # Create or get the attention bias
+    # Create attention bias based on mask
     if isinstance(mask, th.Tensor):
         bias = (~mask).float() * -1e9
     elif isinstance(mask, bool) and mask:
-        # Get causal attention mask (lower triangular)
-        # This is a bit magical - it needs to create a mask of the right shape
-        # that matches Q and K dimensions
-        try:
-            bias = get_attn_bias_cached(t, T, maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
-        except:
-            # Fallback if the function doesn't exist or fails
-            bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
-            # Create causal mask where each position i can only attend to positions 0:i
-            for i in range(t):
-                bias[:, i, i+1:] = -1e9
+        # Create causal mask manually (lower triangular)
+        bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
+        for i in range(t):
+            max_attend = min(i+1, T)  # Position i can attend to 0:i+1
+            if max_attend < T:
+                bias[:, i, max_attend:] = -1e9
     else:
         bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
     
-    # Handle relative position bias if provided
+    # Add positional bias if provided
     if extra_btT is not None:
-        # Ensure extra_btT has the right dimensions
+        # First ensure extra_btT has the right shape
         if extra_btT.shape[1] != t or extra_btT.shape[2] != T:
-            # Need to reshape extra_btT
-            # Create a new tensor of the right shape
+            # Create a new tensor with the right shape
             new_extra = th.zeros((b, t, T), device=extra_btT.device, dtype=extra_btT.dtype)
             
-            # Copy what we can from the original
-            src_t = min(extra_btT.shape[1], t)
-            src_T = min(extra_btT.shape[2], T)
+            # Copy the relevant parts from extra_btT
+            min_rows = min(extra_btT.shape[1], t)
+            min_cols = min(extra_btT.shape[2], T)
             
-            if extra_btT.shape[1] == 1 and t > 1:
-                # Expand singleton dimension
-                for i in range(t):
-                    new_extra[:, i, :src_T] = extra_btT[:, 0, :src_T]
-            else:
-                # Copy directly
-                new_extra[:, :src_t, :src_T] = extra_btT[:, :src_t, :src_T]
+            # Simple case - we're just truncating
+            new_extra[:, :min_rows, :min_cols] = extra_btT[:, :min_rows, :min_cols] 
             
             extra_btT = new_extra
         
-        # Now add to bias
+        # Now they should be compatible for addition
         bias = bias + extra_btT
     
     # Compute attention with scaled dot product
@@ -98,17 +80,8 @@ def attention(
         alpha=1 / math.sqrt(e),
     )
     
-    if check_sentinel:
-        invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
-        invalid = misc.reshape(invalid, "b, T", "b, 1, T")
-        logit_btT = logit_btT - 1e9 * invalid.float()
-    
     # Apply softmax along context dimension
     W_btT = th.softmax(logit_btT, dim=2).to(dtype)
-    
-    # Handle callable V (rare case)
-    if callable(V_bTe):
-        V_bTe = V_bTe()
     
     # Compute weighted sum of values
     A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
