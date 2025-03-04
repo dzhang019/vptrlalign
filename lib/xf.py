@@ -363,7 +363,7 @@ class SelfAttentionLayer(AttentionLayerBase):
         # print(f"Q_bte (post-preproc) shape: {Q_bte.shape}")
         # print(f"K_bte (post-preproc) shape: {K_bte.shape}")
         # print(f"V_bte (post-preproc) shape: {V_bte.shape}")
-        if extra_btT is not None:
+        #if extra_btT is not None:
             # print(f"extra_btT shape: {extra_btT.shape}")
         A_bte = attention(
             Q_bte,
