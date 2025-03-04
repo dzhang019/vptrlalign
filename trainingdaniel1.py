@@ -296,37 +296,50 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         })
 
     # Bootstrap and GAE calculation remain the same
+    # if not transitions[-1]["done"]:
+    #     with th.no_grad():
+    #         hid_t_cpu = rollout["hidden_states"][-1]
+    #         print(f"Hidden state (CPU) type: {type(hid_t_cpu)}")
+    #         print(f"Hidden state (CPU) length: {len(hid_t_cpu)}")
+    #         for i, element in enumerate(hid_t_cpu):
+    #             print(f"Element {i} type: {type(element)}")
+    #             if isinstance(element, th.Tensor):
+    #                 print(f"Element {i} shape: {element.shape}")
+
+    #         hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
+    #         print(f"Hidden state (GPU) type: {type(hid_t)}")
+    #         print(f"Hidden state (GPU) length: {len(hid_t)}")
+    #         for i, element in enumerate(hid_t):
+    #             print(f"Element {i} type: {type(element)}")
+    #             if isinstance(element, th.Tensor):
+    #                 print(f"Element {i} shape: {element.shape}")
+    #         if isinstance(hid_t, (list, tuple)) and len(hid_t) == 2:  # Assuming cache is (keys, values)
+    #             keys, values = hid_t
+    #         else:
+    #             print("not isinstance or len(hid_t)=2")
+    #         print(f"Cache shape: keys = {keys.shape}, values = {values.shape}")
+    #         _, _, v_next, _, _ = agent.get_action_and_training_info(
+    #             minerl_obs=transitions[-1]["next_obs"],
+    #             hidden_state=hid_t,
+    #             stochastic=False,
+    #             taken_action=None
+    #         )
+    #     bootstrap_value = v_next.item()
+    # else:
+    #     bootstrap_value = 0.0
     if not transitions[-1]["done"]:
         with th.no_grad():
             hid_t_cpu = rollout["hidden_states"][-1]
-            print(f"Hidden state (CPU) type: {type(hid_t_cpu)}")
-            print(f"Hidden state (CPU) length: {len(hid_t_cpu)}")
-            for i, element in enumerate(hid_t_cpu):
-                print(f"Element {i} type: {type(element)}")
-                if isinstance(element, th.Tensor):
-                    print(f"Element {i} shape: {element.shape}")
-
             hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
-            print(f"Hidden state (GPU) type: {type(hid_t)}")
-            print(f"Hidden state (GPU) length: {len(hid_t)}")
-            for i, element in enumerate(hid_t):
-                print(f"Element {i} type: {type(element)}")
-                if isinstance(element, th.Tensor):
-                    print(f"Element {i} shape: {element.shape}")
-            if isinstance(hid_t, (list, tuple)) and len(hid_t) == 2:  # Assuming cache is (keys, values)
-                keys, values = hid_t
-            else:
-                print("not isinstance or len(hid_t)=2")
-            print(f"Cache shape: keys = {keys.shape}, values = {values.shape}")
+            
+            # No need to unpack - just pass the entire structure
             _, _, v_next, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 hidden_state=hid_t,
                 stochastic=False,
                 taken_action=None
             )
-        bootstrap_value = v_next.item()
-    else:
-        bootstrap_value = 0.0
+    bootstrap_value = v_next.item()
     gae = 0.0
     for i in reversed(range(T)):
         r_i = transitions[i]["reward"]
