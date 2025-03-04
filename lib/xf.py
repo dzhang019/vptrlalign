@@ -42,6 +42,7 @@ def attention(
     
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
+    '''
     q_len = Q_bte.shape[1]
     k_len = K_bTe.shape[1]
     if isinstance(mask, bool) and mask and k_len > maxlen:
@@ -49,6 +50,17 @@ def attention(
         K_bTe = K_bTe[:, -maxlen:, :]
         V_bTe = V_bTe[:, -maxlen:, :]
         # print(f"Truncated K_bTe to shape: {K_bTe.shape}")
+    '''
+    if extra_btT is not None and extra_btT.shape[1] != Q_bte.shape[1]:
+        if extra_btT.shape[1] > Q_bte.shape[1]:
+            # If extra_btT has more timesteps than Q, truncate it
+            extra_btT = extra_btT[:, :Q_bte.shape[1], :]
+            print(f"Truncated extra_btT to match Q shape: {extra_btT.shape}")
+        else:
+            # If extra_btT has fewer timesteps than Q, repeat or pad it
+            # (this depends on what makes sense for your model)
+            extra_btT = extra_btT.expand(-1, Q_bte.shape[1], -1)
+            print(f"Expanded extra_btT to match Q shape: {extra_btT.shape}")
     if check_sentinel:
         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
@@ -62,11 +74,35 @@ def attention(
     if extra_btT is not None:
         # print("xf.py: bias shape before addition:", bias.shape)
         # print("xf.py: extra_btT shape:", extra_btT.shape)
+        # Ensure bias and extra_btT have matching dimensions
+        if bias.shape[1] != extra_btT.shape[1]:
+            # Reshape bias to match extra_btT in dimension 1
+            if isinstance(bias, th.Tensor) and bias.dim() > 0 and bias.shape[1] != extra_btT.shape[1]:
+                # This could be a broadcasting issue - ensure both tensors have compatible shapes
+                if bias.shape[1] == 1:
+                    # If bias has a singleton dimension, expand it
+                    bias = bias.expand(-1, extra_btT.shape[1], -1)
+                    print(f"Expanded bias to: {bias.shape}")
+                elif extra_btT.shape[1] == 1:
+                    # If extra_btT has a singleton dimension, expand it
+                    extra_btT = extra_btT.expand(-1, bias.shape[1], -1)
+                    print(f"Expanded extra_btT to: {extra_btT.shape}")
+                else:
+                    # If neither has a singleton dimension, truncate the larger one
+                    if bias.shape[1] > extra_btT.shape[1]:
+                        bias = bias[:, :extra_btT.shape[1], :]
+                        print(f"Truncated bias to: {bias.shape}")
+                    else:
+                        extra_btT = extra_btT[:, :bias.shape[1], :]
+                        print(f"Truncated extra_btT to: {extra_btT.shape}")
+
         if bias.shape[2] != extra_btT.shape[2]:
-            # Option 1: Truncate bias to match extra_btT
             if bias.shape[2] > extra_btT.shape[2]:
                 bias = bias[:, :, :extra_btT.shape[2]]
-                # print(f"Truncated bias to: {bias.shape}")
+                print(f"Truncated bias dimension 2 to: {bias.shape}")
+            else:
+                extra_btT = extra_btT[:, :, :bias.shape[2]]
+                print(f"Truncated extra_btT dimension 2 to: {extra_btT.shape}")
         bias = bias + extra_btT
     logit_btT = th.baddbmm(
         bias,
