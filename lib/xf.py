@@ -39,14 +39,16 @@ def attention(
     """
     print("xf.py: Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
     print("xf.py: K_bTe shape:", K_bTe.shape)  
-    q_len = Q_bte.shape[1]
-    k_len = K_bTe.shape[1]
-    if k_len > q_len and mask:
-        # Keep only the most recent k_len positions
-        K_bTe = K_bTe[:, -q_len:, :]
-        V_bTe = V_bTe[:, -q_len:, :]
+    
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
+    q_len = Q_bte.shape[1]
+    k_len = K_bTe.shape[1]
+    if isinstance(mask, bool) and mask and k_len > maxlen:
+        # Truncate K and V to maxlen
+        K_bTe = K_bTe[:, -maxlen:, :]
+        V_bTe = V_bTe[:, -maxlen:, :]
+        print(f"Truncated K_bTe to shape: {K_bTe.shape}")
     if check_sentinel:
         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
