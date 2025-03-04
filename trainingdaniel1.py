@@ -242,11 +242,11 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
             f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
             f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
-        if iteration <= max_profile_iters:
-                prof.step()
-        else:
-            # after we've done a few profiled iters, no need to keep calling step
-            pass
+        # if iteration <= max_profile_iters:
+        #         prof.step()
+        # else:
+        #     # after we've done a few profiled iters, no need to keep calling step
+        #     pass
     #print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
 
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
