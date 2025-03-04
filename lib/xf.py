@@ -39,7 +39,18 @@ def attention(
     """
     # print("xf.py: Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
     # print("xf.py: K_bTe shape:", K_bTe.shape)  
-    
+    print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+    b, t, e = Q_bte.shape
+    _, T, _ = K_bTe.shape
+    if t != T and (extra_btT is not None and extra_btT.shape[1] != Q_bte.shape[1]):
+        # Reshape extra_btT to match Q's sequence dimension
+        print(f"Handling sequence length mismatch: Q={t}, K={T}")
+        if extra_btT.shape[1] == 1 and t > 1:
+            # If extra_btT has a single timestep but Q has multiple, repeat extra_btT
+            extra_btT = extra_btT.expand(b, t, -1)
+        elif extra_btT.shape[1] > 1 and t == 1:
+            # If Q has a single timestep but extra_btT has multiple, just use first timestep
+            extra_btT = extra_btT[:, :1, :]
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
     '''
