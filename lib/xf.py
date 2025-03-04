@@ -24,53 +24,67 @@ def attention(
     check_sentinel=False,
     use_muP_factor=False,
 ):
-    """Simplified attention that handles both single-step and batch mode safely"""
+    """Simplified attention with detailed debugging"""
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
     
+    print(f"DEBUG: Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+    
     if t == 1:
-        # Single-step mode (environment thread)
-        pass  # Keep K and V as they are (full context)
+        print(f"DEBUG: Single-step mode with T={T}")
     elif t > 1 and T > t:
-        # Batch mode (training thread) with K too long
-        # Truncate K and V to match Q
+        print(f"DEBUG: Batch mode with t={t}, T={T}")
         K_bTe = K_bTe[:, -t:, :]
         V_bTe = V_bTe[:, -t:, :]
+        print(f"DEBUG: After truncation: K shape: {K_bTe.shape}")
     
     # Update T after possible truncation
     T = K_bTe.shape[1]
     
-    # Create attention bias based on mask
     if isinstance(mask, th.Tensor):
+        print(f"DEBUG: Mask is a tensor with shape {mask.shape}")
         bias = (~mask).float() * -1e9
     elif isinstance(mask, bool) and mask:
+        print("DEBUG: Creating causal mask manually")
         # Create causal mask manually (lower triangular)
         bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
         for i in range(t):
-            max_attend = min(i+1, T)  # Position i can attend to 0:i+1
+            max_attend = min(i+1, T)
             if max_attend < T:
                 bias[:, i, max_attend:] = -1e9
     else:
+        print("DEBUG: No mask, using zero bias")
         bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
     
-    # Add positional bias if provided
+    print(f"DEBUG: Bias shape after creation: {bias.shape}")
+    
     if extra_btT is not None:
-        # First ensure extra_btT has the right shape
-        if extra_btT.shape[1] != t or extra_btT.shape[2] != T:
-            # Create a new tensor with the right shape
-            new_extra = th.zeros((b, t, T), device=extra_btT.device, dtype=extra_btT.dtype)
+        print(f"DEBUG: extra_btT provided with shape: {extra_btT.shape}")
+        print(f"DEBUG: bias shape: {bias.shape}, extra_btT shape: {extra_btT.shape}")
+        
+        # CRITICAL FIX: Make sure extra_btT matches bias exactly
+        extra_btT_clone = extra_btT.clone()  # Make a copy to avoid modifying original
+        
+        if extra_btT_clone.shape != bias.shape:
+            print(f"DEBUG: Shapes don't match, creating new tensor")
+            # Create a new tensor with exactly the same shape as bias
+            new_extra = th.zeros_like(bias, device=extra_btT_clone.device)
             
-            # Copy the relevant parts from extra_btT
-            min_rows = min(extra_btT.shape[1], t)
-            min_cols = min(extra_btT.shape[2], T)
+            # Only copy the overlapping part
+            min_b = min(extra_btT_clone.shape[0], bias.shape[0])
+            min_t = min(extra_btT_clone.shape[1], bias.shape[1])
+            min_T = min(extra_btT_clone.shape[2], bias.shape[2])
             
-            # Simple case - we're just truncating
-            new_extra[:, :min_rows, :min_cols] = extra_btT[:, :min_rows, :min_cols] 
-            
+            # Careful slicing to copy only what fits
+            new_extra[:min_b, :min_t, :min_T] = extra_btT_clone[:min_b, :min_t, :min_T]
             extra_btT = new_extra
         
-        # Now they should be compatible for addition
+        print(f"DEBUG: Final bias shape: {bias.shape}, extra_btT shape: {extra_btT.shape}")
+        assert bias.shape == extra_btT.shape, "Shapes still don't match after adjustment!"
+        
         bias = bias + extra_btT
+    
+    print(f"DEBUG: Final bias shape before baddbmm: {bias.shape}")
     
     # Compute attention with scaled dot product
     logit_btT = th.baddbmm(
