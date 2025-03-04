@@ -266,11 +266,11 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         stochastic=False,
         taken_actions_list=act_seq
     )
-    print(f"pi_dist_seq type: {type(pi_dist_seq)}")
-    if hasattr(pi_dist_seq, 'keys'):
-        print(f"pi_dist_seq keys: {pi_dist_seq.keys()}")
-    else:
-        print(f"pi_dist_seq length: {len(pi_dist_seq)}")
+    # print(f"pi_dist_seq type: {type(pi_dist_seq)}")
+    # if hasattr(pi_dist_seq, 'keys'):
+    #     print(f"pi_dist_seq keys: {pi_dist_seq.keys()}")
+    # else:
+    #     print(f"pi_dist_seq length: {len(pi_dist_seq)}")
     old_pi_dist_seq, old_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
@@ -279,15 +279,19 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     )
 
     for t in range(T):
+        # Create a timestep-specific policy distribution dictionary
+        cur_pd_t = {k: v[t] for k, v in pi_dist_seq.items()}
+        old_pd_t = {k: v[t] for k, v in old_pi_dist_seq.items()}
+        
         transitions.append({
             "obs": rollout["obs"][t],
             "action": rollout["actions"][t],
             "reward": rollout["rewards"][t],
             "done": rollout["dones"][t],
-            "v_pred": vpred_seq[t],        # Now [T], so index directly
-            "log_prob": log_prob_seq[t],    # Now [T]
-            "cur_pd": pi_dist_seq[t],       # Now [T, ...]
-            "old_pd": old_pi_dist_seq[t],   # Now [T, ...]
+            "v_pred": vpred_seq[t],
+            "log_prob": log_prob_seq[t],
+            "cur_pd": cur_pd_t,     # Now a dictionary for this timestep
+            "old_pd": old_pd_t,     # Now a dictionary for this timestep
             "next_obs": rollout["next_obs"][t]
         })
 
