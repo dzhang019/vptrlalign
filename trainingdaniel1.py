@@ -252,6 +252,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]        # list of T actions
     hidden_states_seq = rollout["hidden_states"]
 
+    #initial_hidden_state = tree_map(lambda x: x.to(agent.device), rollout["hidden_states"][0])
     initial_hidden = tree_map(lambda x: x.to("cuda").contiguous(), hidden_states_seq[0])
     pi_dist_seq, vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
