@@ -332,7 +332,7 @@ class MineRLAgent:
         - Returns pi_dist_seq, vpred_seq, log_prob_seq, final_hidden_state
         each of which is length T or shaped [T, ...].
         """
-
+        initial_hidden_state = tree_map(lambda x: x.to(self.device), initial_hidden_state)
         # 1) Convert each MineRL observation to agent input & stack
         #    Suppose you have T dicts like {"pov": ...}
         #    We'll produce a single batch dimension with shape [T, C, H, W].
