@@ -105,7 +105,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["rewards"].append(env_reward_i)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().cpu(), hidden_states[env_i])
+                        tree_map(lambda x: x.detach().cpu().contiguous, hidden_states[env_i])
                     )
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
@@ -252,10 +252,10 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]        # list of T actions
     hidden_states_seq = rollout["hidden_states"]
 
-    initial_hidden_state = tree_map(lambda x: x.to(agent.device), rollout["hidden_states"][0])
+    initial_hidden = tree_map(lambda x: x.to("cuda").contiguous(), hidden_states_seq[0])
     pi_dist_seq, vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
-        initial_hidden_state=initial_hidden_state,  # or however you do it
+        initial_hidden_state=initial_hidden,  # or however you do it
         stochastic=False,
         taken_actions_list=act_seq  # if you want logprob for forced actions
     )
@@ -288,7 +288,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     if not transitions[-1]["done"]:
         with th.no_grad():
             hid_t_cpu = rollout["hidden_states"][-1]
-            hid_t = tree_map(lambda x: x.to("cuda"), hid_t_cpu)
+            hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
             _, _, v_next, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 # hidden_state=rollout["hidden_states"][-1],
