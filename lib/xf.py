@@ -37,6 +37,8 @@ def attention(
     All keys where every value is equal to the constant SENTINEL will be ignored.
     Currently this is only used by StridedAttn.
     """
+    print("Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
+    print("K_bTe shape:", K_bTe.shape)  
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
     if check_sentinel:
@@ -46,9 +48,12 @@ def attention(
         bias = (~mask).float() * -1e9
     elif mask:
         bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
+        print("Bias from get_attn_bias_cached shape:", bias.shape)
     else:
         bias = Q_bte.new_zeros((), dtype=th.float32)
     if extra_btT is not None:
+        print("bias shape before addition:", bias.shape)
+        print("extra_btT shape:", extra_btT.shape)
         bias = bias + extra_btT
     logit_btT = th.baddbmm(
         bias,
