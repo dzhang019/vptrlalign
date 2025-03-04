@@ -266,6 +266,11 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         stochastic=False,
         taken_actions_list=act_seq
     )
+    print(f"pi_dist_seq type: {type(pi_dist_seq)}")
+    if hasattr(pi_dist_seq, 'keys'):
+        print(f"pi_dist_seq keys: {pi_dist_seq.keys()}")
+    else:
+        print(f"pi_dist_seq length: {len(pi_dist_seq)}")
     old_pi_dist_seq, old_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
