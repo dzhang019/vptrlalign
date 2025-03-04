@@ -62,6 +62,11 @@ def attention(
     if extra_btT is not None:
         print("xf.py: bias shape before addition:", bias.shape)
         print("xf.py: extra_btT shape:", extra_btT.shape)
+        if bias.shape[2] != extra_btT.shape[2]:
+            # Option 1: Truncate bias to match extra_btT
+            if bias.shape[2] > extra_btT.shape[2]:
+                bias = bias[:, :, :extra_btT.shape[2]]
+                print(f"Truncated bias to: {bias.shape}")
         bias = bias + extra_btT
     logit_btT = th.baddbmm(
         bias,
