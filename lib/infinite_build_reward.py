@@ -1,15 +1,17 @@
 def custom_reward_function(obs, done, info, visited_squares):
     """
-    Reward the agent for construction activities (developing new map squares) 
-    and survival. The long-term, unattainable goal is to build on every square of the map,
-    with extra rewards when using valuable materials (e.g., iron, diamond). 
-    However, survival remains essential—if the agent's health drops, it gets a steep penalty,
-    which may eventually force it to learn the instrumental sub-goal of staying alive.
-
+    Reward function for encouraging survival, material collection, and construction.
+    
+    Modifications:
+    - Reduced passive survival reward to prevent idle behavior.
+    - Reward for collecting useful materials like wood and stone.
+    - Penalty for collecting useless items like wheat seeds and flowers.
+    - Increased reward for any construction to make it more attractive.
+    
     Args:
         obs: Observation dictionary from the environment.
         done: Boolean indicating if the episode is done.
-        info: Info dictionary with additional metadata (e.g., biome or other context).
+        info: Info dictionary with additional metadata.
         visited_squares: Set of squares (e.g., (x_chunk, z_chunk)) where a build event has occurred.
     
     Returns:
@@ -18,28 +20,50 @@ def custom_reward_function(obs, done, info, visited_squares):
     reward = 0
 
     # --- Survival Incentives ---
-    # Small bonus for staying alive at each step.
     if not done:
-        reward += 0.1
+        reward += 0.01  # Reduced from 0.1 to prevent passive survival exploitation
 
-    # Penalize if health is low.
+    # Penalize if health is low
     if "life_stats" in obs:
         life_stats = obs["life_stats"]
-        # Assume maximum health is 20. A threshold of 10 triggers a penalty.
         if life_stats.get("life", 20) < 10:
             reward -= 30
             print("Low health detected: applying survival penalty.")
 
+    # --- Material Collection Incentives ---
+    if "inventory" in obs:
+        inventory = obs["inventory"]
+
+        # Reward useful materials
+        wood_count = inventory.get("log", 0)
+        stone_count = inventory.get("cobblestone", 0)
+
+        if wood_count > 0:
+            reward += 2 * wood_count  # Reward for collecting logs
+            print(f"Collected {wood_count} logs -> reward: {2 * wood_count}")
+
+        if stone_count > 0:
+            reward += 3 * stone_count  # Reward for collecting stone
+            print(f"Collected {stone_count} stone -> reward: {3 * stone_count}")
+
+        # Penalize useless item collection (grass, flowers, wheat seeds)
+        seeds = inventory.get("wheat_seeds", 0)
+        flowers = sum(inventory.get(flower, 0) for flower in ["poppy", "dandelion", "blue_orchid"])
+
+        if seeds > 0:
+            reward -= 0.5 * seeds  # Small penalty for collecting wheat seeds
+            print(f"Collected {seeds} wheat seeds -> penalty: {-0.5 * seeds}")
+
+        if flowers > 0:
+            reward -= 0.3 * flowers  # Small penalty for collecting flowers
+            print(f"Collected {flowers} flowers -> penalty: {-0.3 * flowers}")
+
     # --- Building / Construction Incentives ---
-    # Check if a build event occurred in this observation.
-    # Assume obs['build_stats'] includes details of the recent build.
     if "build_stats" in obs:
         build_stats = obs["build_stats"]
-        # Expected keys: 'location' (e.g., (x, y, z)) and 'material'
         build_location = build_stats.get("location", None)
-        material = build_stats.get("material", "wood")  # Default to wood if unspecified
+        material = build_stats.get("material", "wood")
 
-        # Define multipliers for different materials (more valuable materials yield higher rewards)
         material_multipliers = {
             "wood": 1,
             "stone": 1.5,
@@ -47,23 +71,12 @@ def custom_reward_function(obs, done, info, visited_squares):
             "gold": 2.5,
             "diamond": 4
         }
-        # Get the multiplier for the material used
         material_reward = material_multipliers.get(material, 1)
 
-        if build_location is not None:
-            # Convert build location to a grid square identifier (e.g., chunks of 16 blocks)
+        if build_location:
             square = (int(build_location[0]) // 16, int(build_location[2]) // 16)
-            if square not in visited_squares:
-                # New square developed: assign a higher base reward multiplied by material value.
-                base_build_reward = 5
-                reward += base_build_reward * material_reward
-                visited_squares.add(square)
-                print(f"New build in square {square} using {material} -> reward: {base_build_reward * material_reward}")
-            else:
-                # If already developed, still reward but with a smaller bonus.
-                reward += 1
-                print(f"Additional build in square {square} using {material} -> small bonus applied.")
-    else:
-        print("No build event detected in this observation.")
+            reward += 10 * material_reward  # Increased reward for any building
+            visited_squares.add(square)
+            print(f"Built in {square} using {material} -> reward: {10 * material_reward}")
 
     return reward, visited_squares
