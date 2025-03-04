@@ -42,15 +42,20 @@ def attention(
     print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
-    if t != T and (extra_btT is not None and extra_btT.shape[1] != Q_bte.shape[1]):
-        # Reshape extra_btT to match Q's sequence dimension
-        print(f"Handling sequence length mismatch: Q={t}, K={T}")
-        if extra_btT.shape[1] == 1 and t > 1:
-            # If extra_btT has a single timestep but Q has multiple, repeat extra_btT
-            extra_btT = extra_btT.expand(b, t, -1)
-        elif extra_btT.shape[1] > 1 and t == 1:
-            # If Q has a single timestep but extra_btT has multiple, just use first timestep
-            extra_btT = extra_btT[:, :1, :]
+    if t != T:
+        print(f"Sequence length mismatch: Q={t}, K={T}")
+        # For causal attention, we might need to adjust K and V
+        if t == 1 and T > t:
+            # If Q has only one step but K has many, we can either:
+            # 1. Take the last T elements from K and V
+            K_bTe = K_bTe[:, -t:, :]
+            V_bTe = V_bTe[:, -t:, :]
+            print(f"Truncated K/V to match single-step Q: K={K_bTe.shape}")
+        elif t > 1 and T > t:
+            # If Q has multiple steps but K has more, truncate K to match
+            K_bTe = K_bTe[:, -t:, :]
+            V_bTe = V_bTe[:, -t:, :]
+            print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
     e = Q_bte.shape[2]
     '''
