@@ -107,12 +107,12 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["hidden_states"].append(
                         tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_i])
                     )
-                    print(f"Hidden state type: {type(hidden_states[env_i])}")
-                    print(f"Hidden state length: {len(hidden_states[env_i])}")
-                    for i, element in enumerate(hidden_states[env_i]):
-                        print(f"Element {i} type: {type(element)}")
-                        if isinstance(element, th.Tensor):
-                            print(f"Element {i} shape: {element.shape}")
+                    # print(f"Hidden state type: {type(hidden_states[env_i])}")
+                    # print(f"Hidden state length: {len(hidden_states[env_i])}")
+                    # for i, element in enumerate(hidden_states[env_i]):
+                    #     print(f"Element {i} type: {type(element)}")
+                    #     if isinstance(element, th.Tensor):
+                    #         print(f"Element {i} shape: {element.shape}")
                     #print(f"Stored hidden state: keys shape = {hidden_states[env_i][0].shape}, values shape = {hidden_states[env_i][1].shape}")
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
@@ -157,97 +157,97 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     iteration = 0
     scaler = GradScaler()
     max_profile_iters = 5  # how many iterations we record
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True
-    ) as prof:
-        while iteration < num_iterations and not stop_flag[0]:
-            iteration += 1
+    # with torch.profiler.profile(
+    #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True
+    # ) as prof:
+    while iteration < num_iterations and not stop_flag[0]:
+        iteration += 1
+        
+        
+        print(f"[Training Thread] Waiting for rollouts...")
+        wait_start_time = time.time()
+        rollouts = rollout_queue.get()
+        wait_end_time = time.time()
+        wait_duration = wait_end_time - wait_start_time
+        print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+        train_start_time = time.time()
+        print(f"[Training Thread] Processing rollouts for iteration {iteration}")
+        
+        # Process rollouts
+        transitions_all = []
+        for env_i, env_rollout in enumerate(rollouts):
+            env_transitions = train_unroll(
+                agent,
+                pretrained_policy,
+                env_rollout,
+                gamma=GAMMA,
+                lam=LAM
+            )
+            transitions_all.extend(env_transitions)
+        
+        if len(transitions_all) == 0:
+            print(f"[Training Thread] No transitions collected, skipping update.")
+            continue
+        
+        # OPTIMIZATION: Batch processing instead of individual transition processing
+        batch_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in transitions_all])
+        batch_returns = th.tensor([t["return"] for t in transitions_all], device="cuda")
+        batch_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in transitions_all])
+        batch_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in transitions_all])
+        
+        # Compute losses in batch
+        optimizer.zero_grad()
+        
+        # Policy loss (using negative log probability * advantages)
+        with autocast():
+            policy_loss = -(batch_advantages * batch_log_probs).mean()
             
+            # Value function loss
+            value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
             
-            print(f"[Training Thread] Waiting for rollouts...")
-            wait_start_time = time.time()
-            rollouts = rollout_queue.get()
-            wait_end_time = time.time()
-            wait_duration = wait_end_time - wait_start_time
-            print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
-            train_start_time = time.time()
-            print(f"[Training Thread] Processing rollouts for iteration {iteration}")
+            # KL divergence loss - this needs to be handled separately
+            kl_losses = []
+            for t in transitions_all:
+                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                kl_losses.append(kl_loss)
+            kl_loss = th.stack(kl_losses).mean()
             
-            # Process rollouts
-            transitions_all = []
-            for env_i, env_rollout in enumerate(rollouts):
-                env_transitions = train_unroll(
-                    agent,
-                    pretrained_policy,
-                    env_rollout,
-                    gamma=GAMMA,
-                    lam=LAM
-                )
-                transitions_all.extend(env_transitions)
-            
-            if len(transitions_all) == 0:
-                print(f"[Training Thread] No transitions collected, skipping update.")
-                continue
-            
-            # OPTIMIZATION: Batch processing instead of individual transition processing
-            batch_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in transitions_all])
-            batch_returns = th.tensor([t["return"] for t in transitions_all], device="cuda")
-            batch_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in transitions_all])
-            batch_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in transitions_all])
-            
-            # Compute losses in batch
-            optimizer.zero_grad()
-            
-            # Policy loss (using negative log probability * advantages)
-            with autocast():
-                policy_loss = -(batch_advantages * batch_log_probs).mean()
-                
-                # Value function loss
-                value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
-                
-                # KL divergence loss - this needs to be handled separately
-                kl_losses = []
-                for t in transitions_all:
-                    kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
-                    kl_losses.append(kl_loss)
-                kl_loss = th.stack(kl_losses).mean()
-                
-                # Total loss
-                total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
-            
-            # Backpropagate
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
-            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
-            scaler.step(optimizer)
-            scaler.update()
-            # optimizer.step()
-            train_end_time = time.time()
-            train_duration = train_end_time - train_start_time
-            
-            print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
-                f"to process and train on {len(transitions_all)} transitions.")
-            
-            # Update stats
-            total_loss_val = total_loss.item()
-            running_loss += total_loss_val * len(transitions_all)
-            total_steps += len(transitions_all)
-            avg_loss = (running_loss / total_steps) if total_steps > 0 else 0.0
-            LAMBDA_KL *= KL_DECAY
-            
-            print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
-                f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
-                f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
-                f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
-            if iteration <= max_profile_iters:
-                    prof.step()
-            else:
-                # after we've done a few profiled iters, no need to keep calling step
-                pass
-    print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
+            # Total loss
+            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+        
+        # Backpropagate
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
+        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+        scaler.step(optimizer)
+        scaler.update()
+        # optimizer.step()
+        train_end_time = time.time()
+        train_duration = train_end_time - train_start_time
+        
+        print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
+            f"to process and train on {len(transitions_all)} transitions.")
+        
+        # Update stats
+        total_loss_val = total_loss.item()
+        running_loss += total_loss_val * len(transitions_all)
+        total_steps += len(transitions_all)
+        avg_loss = (running_loss / total_steps) if total_steps > 0 else 0.0
+        LAMBDA_KL *= KL_DECAY
+        
+        print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
+            f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
+            f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
+            f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
+        if iteration <= max_profile_iters:
+                prof.step()
+        else:
+            # after we've done a few profiled iters, no need to keep calling step
+            pass
+    #print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
 
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     transitions = []
