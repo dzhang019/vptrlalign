@@ -1,14 +1,13 @@
 import os
 from argparse import ArgumentParser
 import pickle
-import time
-
 import torch as th
 import numpy as np
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from lib.policy_mod import compute_kl_loss
 from lib.tree_util import tree_map
+from lib.infinite_build_reward import custom_reward_function  # ✅ Import your custom reward function
 
 th.autograd.set_detect_anomaly(True)
 
@@ -25,18 +24,15 @@ KL_DECAY = 0.9995
 
 def save_checkpoint(agent, out_weights, iteration):
     """Saves a backup checkpoint with iteration number and updates the latest weights."""
-    backup_file = f"{out_weights}.bak"  # Backup before overwriting
-    checkpoint_file = f"{out_weights}.iter{iteration}"  # Iteration-specific checkpoint
-    
-    # Save a backup of previous weights (if they exist)
+    backup_file = f"{out_weights}.bak"
+    checkpoint_file = f"{out_weights}.iter{iteration}"
+
     if os.path.exists(out_weights):
         os.replace(out_weights, backup_file)
-    
-    # Save latest model weights
+
     th.save(agent.policy.state_dict(), out_weights)
     print(f"[Checkpoint] Saved latest weights to {out_weights}")
-    
-    # Save a separate checkpoint for rollback
+
     th.save(agent.policy.state_dict(), checkpoint_file)
     print(f"[Checkpoint] Saved iteration {iteration} weights to {checkpoint_file}")
 
@@ -49,16 +45,16 @@ def train_rl(
     num_iterations=10,
     rollout_steps=40,
     num_envs=2,
-    checkpoint_interval=5  # Save every X iterations
+    checkpoint_interval=5
 ):
-    """Train the model with periodic checkpointing."""
+    """Train the model using the custom reward function, with periodic checkpointing."""
     
     # ==== Load agent and environment ====
     dummy_env = HumanSurvival(**ENV_KWARGS).make()
-    
+
     agent_policy_kwargs, agent_pi_head_kwargs = pickle.load(open(in_model, "rb")).values()
     agent = MineRLAgent(dummy_env, device="cuda", policy_kwargs=agent_policy_kwargs, pi_head_kwargs=agent_pi_head_kwargs)
-    
+
     # Load existing weights if available
     if os.path.exists(in_weights):
         print(f"[Loading] Using weights from {in_weights}")
@@ -68,12 +64,13 @@ def train_rl(
 
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
     running_loss, total_steps = 0.0, 0
+    visited_squares = set()  # ✅ Tracks visited build locations
 
     for iteration in range(num_iterations):
         print(f"[Iteration {iteration}] Training...")
 
-        # Collect rollouts (environment interactions)
-        transitions_all = collect_transitions(agent, rollout_steps, num_envs)
+        # Collect rollouts (environment interactions) using the reward function
+        transitions_all = collect_transitions(agent, rollout_steps, num_envs, visited_squares)
         if not transitions_all:
             print(f"[Iteration {iteration}] No transitions collected, skipping update.")
             continue
@@ -99,8 +96,8 @@ def train_rl(
     print(f"[Final] Training complete. Final weights saved to {out_weights}")
 
 
-def collect_transitions(agent, rollout_steps, num_envs):
-    """Simulates environment interactions and collects transitions for training."""
+def collect_transitions(agent, rollout_steps, num_envs, visited_squares):
+    """Simulates environment interactions and collects transitions using the custom reward function."""
     envs = [HumanSurvival(**ENV_KWARGS).make() for _ in range(num_envs)]
     obs_list = [env.reset() for env in envs]
     done_list = [False] * num_envs
@@ -113,8 +110,12 @@ def collect_transitions(agent, rollout_steps, num_envs):
                     minerl_action, _, _, _, _ = agent.get_action_and_training_info(
                         minerl_obs=obs_list[env_i], hidden_state=None, stochastic=True, taken_action=None
                     )
-                
-                next_obs, reward, done, info = envs[env_i].step(minerl_action)
+
+                next_obs, _, done, info = envs[env_i].step(minerl_action)
+
+                # ✅ Compute custom reward using the reward function
+                reward, visited_squares = custom_reward_function(next_obs, done, info, visited_squares)
+
                 if done:
                     reward += DEATH_PENALTY  # Apply death penalty if episode ends
 
