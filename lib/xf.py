@@ -14,127 +14,8 @@ from lib import util
 
 SENTINEL = 0.1337
 
-
-# def attention(
-#     Q_bte,
-#     K_bTe,
-#     V_bTe,
-#     dtype,
-#     mask=True,
-#     extra_btT=None,
-#     maxlen=None,
-#     check_sentinel=False,
-#     use_muP_factor=False,
-# ):
-#     """
-#     performs softmax(Q*K)*V operation
-
-#     t : output (write) time axis, possibly size=1 for just the last timestep
-#     T : input (read) time axis
-#     t < T is OK
-
-#     'check_sentinel' is used when you want to make it impossible to attend to certain keys.
-#     All keys where every value is equal to the constant SENTINEL will be ignored.
-#     Currently this is only used by StridedAttn.
-#     """
-#     # print("xf.py: Q_bte shape:", Q_bte.shape)  # Expected shape: [B, t, e]
-#     # print("xf.py: K_bTe shape:", K_bTe.shape)  
-#     print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
-#     b, t, e = Q_bte.shape
-#     _, T, _ = K_bTe.shape
-#     if t != T:
-#         print(f"Sequence length mismatch: Q={t}, K={T}")
-#         # For causal attention, we might need to adjust K and V
-#         if t == 1 and T > t:
-#             # If Q has only one step but K has many, we can either:
-#             # 1. Take the last T elements from K and V
-#             K_bTe = K_bTe[:, -t:, :]
-#             V_bTe = V_bTe[:, -t:, :]
-#             print(f"Truncated K/V to match single-step Q: K={K_bTe.shape}")
-#         elif t > 1 and T > t:
-#             # If Q has multiple steps but K has more, truncate K to match
-#             K_bTe = K_bTe[:, -t:, :]
-#             V_bTe = V_bTe[:, -t:, :]
-#             print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
-#     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
-#     e = Q_bte.shape[2]
-#     '''
-#     q_len = Q_bte.shape[1]
-#     k_len = K_bTe.shape[1]
-#     if isinstance(mask, bool) and mask and k_len > maxlen:
-#         # Truncate K and V to maxlen
-#         K_bTe = K_bTe[:, -maxlen:, :]
-#         V_bTe = V_bTe[:, -maxlen:, :]
-#         # print(f"Truncated K_bTe to shape: {K_bTe.shape}")
-#     '''
-#     if extra_btT is not None and extra_btT.shape[1] != Q_bte.shape[1]:
-#         if extra_btT.shape[1] > Q_bte.shape[1]:
-#             # If extra_btT has more timesteps than Q, truncate it
-#             extra_btT = extra_btT[:, :Q_bte.shape[1], :]
-#             print(f"Truncated extra_btT to match Q shape: {extra_btT.shape}")
-#         else:
-#             # If extra_btT has fewer timesteps than Q, repeat or pad it
-#             # (this depends on what makes sense for your model)
-#             extra_btT = extra_btT.expand(-1, Q_bte.shape[1], -1)
-#             print(f"Expanded extra_btT to match Q shape: {extra_btT.shape}")
-#     if check_sentinel:
-#         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
-#         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
-#     if isinstance(mask, th.Tensor):
-#         bias = (~mask).float() * -1e9
-#     elif mask:
-#         bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
-#         # print("xf.py: Bias from get_attn_bias_cached shape:", bias.shape)
-#     else:
-#         bias = Q_bte.new_zeros((), dtype=th.float32)
-#     if extra_btT is not None:
-#         # print("xf.py: bias shape before addition:", bias.shape)
-#         # print("xf.py: extra_btT shape:", extra_btT.shape)
-#         # Ensure bias and extra_btT have matching dimensions
-#         if bias.shape[1] != extra_btT.shape[1]:
-#             # Reshape bias to match extra_btT in dimension 1
-#             if isinstance(bias, th.Tensor) and bias.dim() > 0 and bias.shape[1] != extra_btT.shape[1]:
-#                 # This could be a broadcasting issue - ensure both tensors have compatible shapes
-#                 if bias.shape[1] == 1:
-#                     # If bias has a singleton dimension, expand it
-#                     bias = bias.expand(-1, extra_btT.shape[1], -1)
-#                     print(f"Expanded bias to: {bias.shape}")
-#                 elif extra_btT.shape[1] == 1:
-#                     # If extra_btT has a singleton dimension, expand it
-#                     extra_btT = extra_btT.expand(-1, bias.shape[1], -1)
-#                     print(f"Expanded extra_btT to: {extra_btT.shape}")
-#                 else:
-#                     # If neither has a singleton dimension, truncate the larger one
-#                     if bias.shape[1] > extra_btT.shape[1]:
-#                         bias = bias[:, :extra_btT.shape[1], :]
-#                         print(f"Truncated bias to: {bias.shape}")
-#                     else:
-#                         extra_btT = extra_btT[:, :bias.shape[1], :]
-#                         print(f"Truncated extra_btT to: {extra_btT.shape}")
-
-#         if bias.shape[2] != extra_btT.shape[2]:
-#             if bias.shape[2] > extra_btT.shape[2]:
-#                 bias = bias[:, :, :extra_btT.shape[2]]
-#                 print(f"Truncated bias dimension 2 to: {bias.shape}")
-#             else:
-#                 extra_btT = extra_btT[:, :, :bias.shape[2]]
-#                 print(f"Truncated extra_btT dimension 2 to: {extra_btT.shape}")
-#         bias = bias + extra_btT
-#     logit_btT = th.baddbmm(
-#         bias,
-#         Q_bte.float(),
-#         K_bTe.float().transpose(-1, -2),
-#         alpha=(1 / e) if use_muP_factor else (1 / math.sqrt(e)),
-#     )
-#     if check_sentinel:
-#         logit_btT = logit_btT - 1e9 * invalid.float()
-#     W_btT = th.softmax(logit_btT, dim=2).to(dtype)
-#     if callable(V_bTe):
-#         V_bTe = V_bTe()
-#     A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
-#     return A_bte
 def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None, check_sentinel=False, use_muP_factor=False):
-    print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+    # print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
     
@@ -144,15 +25,15 @@ def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None
     if t != T and t == 1 and T > 1:
         # This is the case where we're in step-by-step mode (t=1) with a large context (T>1)
         # In this case, we shouldn't truncate K as it's intentionally longer for context
-        print(f"Single-step attention with context: Q={t}, K={T}")
+        # print(f"Single-step attention with context: Q={t}, K={T}")
         truncated = False
     elif t != T and t > 1 and T > t:
         # This is the case where we're in batch mode but K is larger than Q
         # Only in this case should we truncate
-        print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
+        # print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
         K_bTe = K_bTe[:, -t:, :]
         V_bTe = V_bTe[:, -t:, :]
-        print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
+        # print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
         truncated = True
     
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
@@ -198,7 +79,7 @@ def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None
     if isinstance(bias, th.Tensor) and bias.dim() > 0:
         # Ensure bias has the right shape for bmm: [b, t, T]
         if bias.shape[1] != Q_bte.shape[1] or bias.shape[2] != K_bTe.shape[1]:
-            print(f"Adjusting bias shape from {bias.shape} to match Q={Q_bte.shape[1]}, K={K_bTe.shape[1]}")
+            # print(f"Adjusting bias shape from {bias.shape} to match Q={Q_bte.shape[1]}, K={K_bTe.shape[1]}")
             # Create new bias with correct shape
             new_bias = Q_bte.new_zeros((Q_bte.shape[0], Q_bte.shape[1], K_bTe.shape[1]), dtype=th.float32)
             
@@ -218,7 +99,7 @@ def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None
             bias = new_bias
     
     # Now bias should have shape [b, t, T] 
-    print(f"Final shapes - bias: {bias.shape}, Q: {Q_bte.shape}, K: {K_bTe.shape}")
+    # print(f"Final shapes - bias: {bias.shape}, Q: {Q_bte.shape}, K: {K_bTe.shape}")
     
     # Compute attention
     logit_btT = th.baddbmm(

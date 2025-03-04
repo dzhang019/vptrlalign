@@ -252,7 +252,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     transitions = []
     T = len(rollout["obs"])
-    print("sequence length (T): ", T)
+    # print("sequence length (T): ", T)
     if T == 0:
         return transitions
     
