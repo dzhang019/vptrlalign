@@ -105,8 +105,9 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["rewards"].append(env_reward_i)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().cpu(), hidden_states[env_i])
+                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_i])
                     )
+                    print(f"Stored hidden state: keys shape = {hidden_states[env_i][0].shape}, values shape = {hidden_states[env_i][1].shape}")
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
                     # Update state
@@ -245,6 +246,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     transitions = []
     T = len(rollout["obs"])
+    print("sequence length (T): ", T)
     if T == 0:
         return transitions
     
@@ -281,7 +283,11 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     # Bootstrap and GAE calculation remain the same
     if not transitions[-1]["done"]:
         with th.no_grad():
-            hid_t = tree_map(lambda x: x.to("cuda"), rollout["hidden_states"][-1])
+            hid_t_cpu = rollout["hidden_states"][-1]
+            print(f"Hidden state (CPU): {hid_t_cpu}")
+
+            hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
+            print(f"Hidden state (GPU): {hid_t}")
             _, _, v_next, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 hidden_state=hid_t,
@@ -291,7 +297,6 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         bootstrap_value = v_next.item()
     else:
         bootstrap_value = 0.0
-
     gae = 0.0
     for i in reversed(range(T)):
         r_i = transitions[i]["reward"]

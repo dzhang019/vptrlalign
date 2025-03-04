@@ -381,10 +381,14 @@ class SelfAttentionLayer(AttentionLayerBase):
         return (outstate_K, outstate_V), K_bte, V_bte
 
     def initial_state(self, batchsize, initial_T=0):
-        return (
-            tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype),
-            tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype),
-        )
+        # return (
+        #     tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype),
+        #     tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype),
+        # )
+        keys = tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype)
+        values = tu.zeros((batchsize, initial_T, self.x_size), dtype=self.dtype)
+        print(f"Initialized cache: keys shape = {keys.shape}, values shape = {values.shape}")
+        return keys, values
 
     def empty_state(self):
         return None
