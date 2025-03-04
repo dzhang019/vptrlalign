@@ -441,7 +441,7 @@ class MinecraftAgentPolicy(nn.Module):
         #    Suppose we treat the entire sequence as batch=1, time=T
         #    So shape: obs_sequence["img"] is [T, C, H, W]. We can add a batch dimension => [1, T, C, H, W]
         seq_img = obs_sequence["img"].unsqueeze(0)  # shape [1, T, C, H, W]
-
+        print(seq_img.shape)
         # 2) Build 'first' mask if needed. If you track the first step in each rollout, something like:
         #    first_mask = th.zeros(T, dtype=th.bool, device=self.device)
         #    first_mask[0] = True
@@ -450,7 +450,7 @@ class MinecraftAgentPolicy(nn.Module):
         first_mask = th.zeros(seq_img.shape[1], dtype=th.bool, device=seq_img.device)
         first_mask[0] = True
         first_mask = first_mask.unsqueeze(0)  # shape [1, T]
-
+        print(first_mask.shape)
         # 3) Forward pass through your model
         # self(...) expects shape [B, T, ...], so pass (seq_img, first=first_mask, state_in=hidden_state)
         (pd_seq, vpred_seq, _), state_out = self(
@@ -458,6 +458,7 @@ class MinecraftAgentPolicy(nn.Module):
             first=first_mask,
             state_in=hidden_state
         )
+        print(pd_seq.shape, vpred_seq.shape)
         # pd_seq shape: [B=1, T, ...], vpred_seq shape: [B=1, T, ...]
 
         # 4) If forced_actions is given, compute log_prob of them stepwise
