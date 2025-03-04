@@ -25,61 +25,74 @@ def attention(
     use_muP_factor=False,
 ):
     b, t, e = Q_bte.shape
-    _, T, _ = K_bTe.shape
+    b_k, T, e_k = K_bTe.shape
     
     # Check for mismatch in query and key sequence lengths
-    truncated = False
-    if t != T and t == 1 and T > 1:
-        # This is the case where we're in step-by-step mode (t=1) with a large context (T>1)
-        # In this case, we shouldn't truncate K as it's intentionally longer for context
-        print(f"Single-step attention with context: Q={t}, K={T}")
-        truncated = False
-    elif t != T and t > 1 and T > t:
-        # This is the case where we're in batch mode but K is larger than Q
-        # Only in this case should we truncate
-        print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
-        K_bTe = K_bTe[:, -t:, :]
-        V_bTe = V_bTe[:, -t:, :]
-        print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
-        truncated = True
+    original_T = T  # Remember original key sequence length
+    if t != T:
+        if t == 1 and T > 1:
+            # Single-step mode with context - keep K as is
+            print(f"Single-step attention with context: Q={t}, K={T}")
+        elif t > 1 and T > t:
+            # Batch mode but K is too long - truncate K and V
+            print(f"Sequence length mismatch during batch processing: Q={t}, K={T}")
+            K_bTe = K_bTe[:, -t:, :]
+            V_bTe = V_bTe[:, -t:, :]
+            print(f"Truncated K/V to match Q length: K={K_bTe.shape}")
+    
+    # Update T after potential truncation
+    T = K_bTe.shape[1]
     
     assert Q_bte.dtype == K_bTe.dtype == dtype, f"{Q_bte.dtype}, {K_bTe.dtype}, {dtype} must all match"
-    e = Q_bte.shape[2]
     
     if check_sentinel:
         invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
         invalid = misc.reshape(invalid, "b, T", "b, 1, T")
     
-    # Critical fix: Use isinstance instead of just "if mask:"
+    # Handle bias creation based on mask type
     if isinstance(mask, th.Tensor):
         bias = (~mask).float() * -1e9
-    elif isinstance(mask, bool) and mask:  # Explicitly check if mask is a boolean True
-        # Use the original sequence lengths for bias calculation
-        bias = get_attn_bias_cached(Q_bte.shape[1], K_bTe.shape[1], maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
+    elif isinstance(mask, bool) and mask:
+        # Get attention bias caching function
+        # Since we truncated K, we need to get a bias that matches the new dimensions
+        bias = get_attn_bias_cached(t, T, maxlen=maxlen, device=Q_bte.device, dtype=th.float32)
     else:
-        bias = Q_bte.new_zeros((), dtype=th.float32)
+        # Create zero bias with correct shape for attention
+        bias = Q_bte.new_zeros((b, t, T), dtype=th.float32)
     
+    # Handle extra bias for positions
     if extra_btT is not None:
-        # Only handle dimension matching if we actually have a shape mismatch
-        if isinstance(bias, th.Tensor) and bias.dim() > 0:
-            if bias.shape[1] != extra_btT.shape[1] or bias.shape[2] != extra_btT.shape[2]:
-                # Handle dimension 1 mismatch (batch sequence length)
-                if bias.shape[1] != extra_btT.shape[1]:
-                    if bias.shape[1] == 1:
-                        bias = bias.expand(-1, extra_btT.shape[1], -1)
-                    elif extra_btT.shape[1] == 1:
-                        extra_btT = extra_btT.expand(-1, bias.shape[1], -1)
-                    else:
-                        min_dim1 = min(bias.shape[1], extra_btT.shape[1])
-                        bias = bias[:, :min_dim1, :]
-                        extra_btT = extra_btT[:, :min_dim1, :]
-                
-                # Handle dimension 2 mismatch (sequence length)
-                if bias.shape[2] != extra_btT.shape[2]:
-                    min_dim2 = min(bias.shape[2], extra_btT.shape[2])
-                    bias = bias[:, :, :min_dim2]
-                    extra_btT = extra_btT[:, :, :min_dim2]
+        # If we truncated K, we need to also adapt extra_btT
+        if original_T != T and extra_btT.shape[2] > T:
+            extra_btT = extra_btT[:, :, -T:]
         
+        # Ensure extra_btT matches Q sequence length
+        if extra_btT.shape[1] != t:
+            if extra_btT.shape[1] == 1:
+                extra_btT = extra_btT.expand(-1, t, -1)
+            else:
+                extra_btT = extra_btT[:, :t, :]
+        
+        # Ensure dimensions match for addition
+        # Now bias should be [b, t, T] and extra_btT should be [b, t, T]
+        if bias.shape[2] != extra_btT.shape[2]:
+            # Create a new bias tensor with the right dimensions
+            if isinstance(bias, th.Tensor) and bias.dim() > 0:
+                new_bias = Q_bte.new_zeros((b, t, T), dtype=th.float32)
+                # Copy existing values if there's overlap
+                if bias.dim() == 3:
+                    min_dim2 = min(bias.shape[2], T)
+                    new_bias[:, :, :min_dim2] = bias[:, :, :min_dim2]
+                bias = new_bias
+            
+            # Also adjust extra_btT if needed
+            if extra_btT.shape[2] != T:
+                new_extra = extra_btT.new_zeros((b, t, T))
+                min_dim2 = min(extra_btT.shape[2], T)
+                new_extra[:, :, :min_dim2] = extra_btT[:, :, :min_dim2]
+                extra_btT = new_extra
+        
+        # Now they should have compatible shapes for addition
         bias = bias + extra_btT
     
     # Compute attention
@@ -87,7 +100,7 @@ def attention(
         bias,
         Q_bte.float(),
         K_bTe.float().transpose(-1, -2),
-        alpha=(1 / e) if use_muP_factor else (1 / math.sqrt(e)),
+        alpha=(1 / math.sqrt(e)),
     )
     
     if check_sentinel:
