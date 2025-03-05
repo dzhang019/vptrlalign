@@ -28,22 +28,23 @@ def attention(
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
     
-    print(f"DEBUG: Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+    # print(f"DEBUG: Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
     
     if t == 1:
-        print(f"DEBUG: Single-step mode with T={T}")
+        # print(f"DEBUG: Single-step mode with T={T}")
+        pass
     elif t > 1 and T > t:
-        print(f"DEBUG: Batch mode with t={t}, T={T}")
+        # print(f"DEBUG: Batch mode with t={t}, T={T}")
         K_bTe = K_bTe[:, -t:, :]
         V_bTe = V_bTe[:, -t:, :]
-        print(f"DEBUG: After truncation: K shape: {K_bTe.shape}")
+        # print(f"DEBUG: After truncation: K shape: {K_bTe.shape}")
     
     # Update T after possible truncation
     T = K_bTe.shape[1]
     
     # CRITICAL CHANGE: Always create bias with shape matching Q and K
     if isinstance(mask, th.Tensor):
-        print(f"DEBUG: Mask is a tensor with shape {mask.shape}")
+        # print(f"DEBUG: Mask is a tensor with shape {mask.shape}")
         # Create new bias with the right shape, ignoring the input mask
         bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
         
@@ -55,7 +56,7 @@ def attention(
         # Set the copied part
         bias[:, :min_rows, :min_cols] = mask_slice.float() * -1e9
     elif isinstance(mask, bool) and mask:
-        print("DEBUG: Creating causal mask manually")
+        # print("DEBUG: Creating causal mask manually")
         # Create causal mask manually (lower triangular)
         bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
         for i in range(t):
@@ -63,13 +64,13 @@ def attention(
             if max_attend < T:
                 bias[:, i, max_attend:] = -1e9
     else:
-        print("DEBUG: No mask, using zero bias")
+        # print("DEBUG: No mask, using zero bias")
         bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
     
-    print(f"DEBUG: Bias shape after creation: {bias.shape}")
+    # print(f"DEBUG: Bias shape after creation: {bias.shape}")
     
     if extra_btT is not None:
-        print(f"DEBUG: extra_btT provided with shape: {extra_btT.shape}")
+        # print(f"DEBUG: extra_btT provided with shape: {extra_btT.shape}")
         
         # Create a new extra_btT with the right shape (matching bias exactly)
         new_extra = th.zeros_like(bias)
@@ -82,11 +83,11 @@ def attention(
         new_extra[:, :min_rows, :min_cols] = extra_btT[:, :min_rows, :min_cols]
         extra_btT = new_extra
         
-        print(f"DEBUG: Final extra_btT shape: {extra_btT.shape}")
+        # print(f"DEBUG: Final extra_btT shape: {extra_btT.shape}")
         bias = bias + extra_btT
     
-    print(f"DEBUG: Final bias shape before baddbmm: {bias.shape}")
-    print(f"DEBUG: Q shape: {Q_bte.shape}, K.T shape: {K_bTe.transpose(-1, -2).shape}")
+    # print(f"DEBUG: Final bias shape before baddbmm: {bias.shape}")
+    # print(f"DEBUG: Q shape: {Q_bte.shape}, K.T shape: {K_bTe.transpose(-1, -2).shape}")
     
     # Double-check dimensions are compatible before baddbmm
     assert bias.shape[2] == K_bTe.shape[1], f"Bias col dim ({bias.shape[2]}) must match K row dim ({K_bTe.shape[1]})"
