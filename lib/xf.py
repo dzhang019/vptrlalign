@@ -13,6 +13,79 @@ from lib import torch_util as tu
 from lib import util
 
 SENTINEL = 0.1337
+
+def attention(
+    Q_bte,
+    K_bTe,
+    V_bTe,
+    dtype,
+    mask=True,
+    extra_btT=None,
+    maxlen=None,
+    check_sentinel=False,
+    use_muP_factor=False,
+):
+    """Fixed attention function that preserves full context"""
+    b, t, e = Q_bte.shape
+    _, T, _ = K_bTe.shape
+    
+    # IMPORTANT: Never truncate K/V - always preserve full context window
+    # This means we keep T at 128 even in batch mode
+    
+    # Create attention bias with compatible dimensions
+    if isinstance(mask, th.Tensor):
+        # Create new bias with right shape
+        bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
+        
+        # Copy mask values if possible
+        min_rows = min(mask.shape[1], t)
+        min_cols = min(mask.shape[2], T)
+        mask_slice = ~mask[:, :min_rows, :min_cols]
+        bias[:, :min_rows, :min_cols] = mask_slice.float() * -1e9
+    elif isinstance(mask, bool) and mask:
+        # Create causal mask manually
+        bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
+        for i in range(t):
+            max_attend = min(i+1, T)
+            if max_attend < T:
+                bias[:, i, max_attend:] = -1e9
+    else:
+        bias = th.zeros((b, t, T), device=Q_bte.device, dtype=th.float32)
+    
+    # Handle position encodings
+    if extra_btT is not None:
+        # Create a new extra_btT with the right shape
+        new_extra = th.zeros_like(bias)
+        
+        # Copy values where possible
+        min_rows = min(extra_btT.shape[1], t)
+        min_cols = min(extra_btT.shape[2], T)
+        new_extra[:, :min_rows, :min_cols] = extra_btT[:, :min_rows, :min_cols]
+        
+        bias = bias + new_extra
+    
+    # Compute attention
+    logit_btT = th.baddbmm(
+        bias,
+        Q_bte.float(),
+        K_bTe.float().transpose(-1, -2),
+        alpha=1 / math.sqrt(e),
+    )
+    
+    if check_sentinel:
+        invalid = (K_bTe == SENTINEL).int().sum(dim=-1) == e
+        invalid = misc.reshape(invalid, "b, T", "b, 1, T")
+        logit_btT = logit_btT - 1e9 * invalid.float()
+    
+    W_btT = th.softmax(logit_btT, dim=2).to(dtype)
+    
+    if callable(V_bTe):
+        V_bTe = V_bTe()
+    
+    A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
+    return A_bte
+'''WORKING ATTENTION, BUT MIGHT TRUNCATE MORE THAN WANTED
+
 def attention(
     Q_bte,
     K_bTe,
@@ -106,6 +179,7 @@ def attention(
     # Compute weighted sum of values
     A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
     return A_bte
+    '''
 # def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None, check_sentinel=False, use_muP_factor=False):
 #     # print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
 #     b, t, e = Q_bte.shape
