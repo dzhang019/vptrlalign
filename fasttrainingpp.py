@@ -1,4 +1,34 @@
-from argparse import ArgumentParser
+def custom_reward_function(obs, done, info, visited_chunks=None):
+    """
+    Simplified custom reward function in case the original is not available
+    """
+    # Initialize visited chunks if not provided
+    if visited_chunks is None:
+        visited_chunks = set()
+    
+    reward = 0.0
+    
+    # Extract player position 
+    try:
+        if 'pov' in obs:
+            # Check if we can get position from info
+            if 'player_pos' in info:
+                x, y, z = info['player_pos']
+                chunk_x, chunk_z = int(x) // 16, int(z) // 16
+                chunk_key = (chunk_x, chunk_z)
+                
+                # Exploration reward for new chunks
+                if chunk_key not in visited_chunks:
+                    reward += 10.0
+                    visited_chunks.add(chunk_key)
+    except Exception as e:
+        print(f"Error in custom reward: {e}")
+    
+    # Survival reward
+    if not done:
+        reward += 0.1  # Small reward for staying alive
+    
+    return reward, visited_chunksfrom argparse import ArgumentParser
 import pickle
 import time
 import threading
@@ -6,12 +36,15 @@ import queue
 import multiprocessing as mp
 from multiprocessing import Process, Queue, Value
 import ctypes
+import os
+import sys
 
 import gym
 import minerl
 import torch as th
 import numpy as np
 
+# Import custom modules - make sure these are in your Python path
 from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
@@ -23,7 +56,7 @@ from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
-
+# Set PyTorch to detect anomalies during training
 th.autograd.set_detect_anomaly(True)
 
 
@@ -76,9 +109,14 @@ def environment_process(env_id, rollouts_queue, ready_queue, data_queue, stop_fl
         
         print(f"[Env Process {env_id}] Started")
         
-        # Signal ready
+        # Signal ready and send initial observation
         ready_queue.put(env_id)
-        print(f"[Env Process {env_id}] Sent ready signal")
+        data_queue.put({
+            "env_id": env_id,
+            "type": "initial_obs",
+            "obs": obs
+        })
+        print(f"[Env Process {env_id}] Sent ready signal and initial observation")
         
         last_action_time = time.time()
         
@@ -91,9 +129,6 @@ def environment_process(env_id, rollouts_queue, ready_queue, data_queue, stop_fl
                 last_action_time = curr_time
                 
                 # Unpack data
-                obs_list = rollout_data.get("obs")
-                done = rollout_data.get("done", False)
-                hidden_state = rollout_data.get("hidden_state")
                 action = rollout_data.get("action")
                 
                 # If action is None, this is a reset signal
@@ -156,7 +191,7 @@ def environment_process(env_id, rollouts_queue, ready_queue, data_queue, stop_fl
                         visited_chunks = set()
                     
                     # Optionally render
-                    if env_id == 0:  # Only render first environment
+                    if env_id == 0 and episode_step_count % 10 == 0:  # Only render first environment occasionally
                         env.render()
                 
                 except Exception as e:
@@ -243,48 +278,67 @@ def environment_thread(agent, rollout_steps, rollouts_queues, ready_queue, data_
     
     # Wait for all environments to be ready
     ready_envs = 0
-    while ready_envs < num_envs:
+    pending_initial_obs = set(range(num_envs))
+    timeout_start = time.time()
+    
+    while ready_envs < num_envs and time.time() - timeout_start < 60.0:  # 60 second timeout
         try:
-            env_id = ready_queue.get(timeout=30.0)
-            ready_envs += 1
-            print(f"[Environment Thread] Environment {env_id} is ready")
-        except queue.Empty:
-            print("[Environment Thread] Timeout waiting for environments to be ready")
-            if ready_envs < num_envs:
-                print(f"[Environment Thread] Only {ready_envs}/{num_envs} environments are ready")
-                # Continue anyway
-                break
-    
-    print("[Environment Thread] All environments ready, getting initial observations")
-    
-    # Get initial observations
-    for env_i in range(num_envs):
-        # Send reset command to each environment
-        rollouts_queues[env_i].put({
-            "obs": None,
-            "done": True,
-            "hidden_state": None,
-            "action": None  # None action signals reset
-        })
-    
-    # Wait for initial observations
-    for _ in range(num_envs):
-        try:
-            result = data_queue.get(timeout=30.0)
-            if result["type"] == "reset_done":
+            result = data_queue.get(timeout=1.0)
+            
+            if result["type"] == "initial_obs":
                 env_i = result["env_id"]
                 obs_list[env_i] = result["obs"]
+                pending_initial_obs.remove(env_i)
+                ready_envs += 1
                 print(f"[Environment Thread] Got initial observation from env {env_i}")
-            else:
-                print(f"[Environment Thread] Unexpected result type: {result['type']}")
+            elif result["type"] == "ready":
+                env_i = result["env_id"]
+                print(f"[Environment Thread] Environment {env_i} is ready")
+            
+            # If we have all initial observations, we can proceed
+            if not pending_initial_obs:
+                break
+                
         except queue.Empty:
-            print("[Environment Thread] Timeout waiting for initial observations")
-            break
+            continue
+        except Exception as e:
+            print(f"[Environment Thread] Error while waiting for environments: {e}")
     
-    # Verify all environments have observations
+    if ready_envs < num_envs:
+        print(f"[Environment Thread] Timeout: Only {ready_envs}/{num_envs} environments provided initial observations")
+        for env_i in pending_initial_obs:
+            print(f"[Environment Thread] Sending reset to env {env_i} to get initial observation")
+            # Try to reset the environment to get an observation
+            rollouts_queues[env_i].put({
+                "action": None  # None action signals reset
+            })
+    
+    # Wait for any remaining initial observations
+    timeout_start = time.time()
+    while pending_initial_obs and time.time() - timeout_start < 30.0:  # 30 second timeout
+        try:
+            result = data_queue.get(timeout=1.0)
+            
+            if result["type"] in ["initial_obs", "reset_done"]:
+                env_i = result["env_id"]
+                if env_i in pending_initial_obs:
+                    obs_list[env_i] = result["obs"]
+                    pending_initial_obs.remove(env_i)
+                    print(f"[Environment Thread] Got observation from env {env_i} after reset")
+            
+            # If we have all initial observations, we can proceed
+            if not pending_initial_obs:
+                break
+                
+        except queue.Empty:
+            continue
+        except Exception as e:
+            print(f"[Environment Thread] Error while waiting for reset observations: {e}")
+    
+    # Final check for observations
     for env_i in range(num_envs):
         if obs_list[env_i] is None:
-            print(f"[Environment Thread] Warning: Environment {env_i} has no initial observation")
+            print(f"[Environment Thread] Warning: Environment {env_i} never provided an observation")
     
     print("[Environment Thread] Starting rollout collection")
     
@@ -326,16 +380,14 @@ def environment_thread(agent, rollout_steps, rollouts_queues, ready_queue, data_
                                 taken_action=None
                             )
                         
+                        # Store hidden state (will be updated after step results)
+                        hidden_states[env_i] = tree_map(lambda x: x.detach(), new_hid_i)
+                        
                         # Send action to environment process
                         rollouts_queues[env_i].put({
-                            "obs": obs_list[env_i],
-                            "done": done_list[env_i],
-                            "hidden_state": hidden_states[env_i],
                             "action": minerl_action_i
                         })
                         
-                        # Store hidden state (will be updated after step results)
-                        hidden_states[env_i] = tree_map(lambda x: x.detach(), new_hid_i)
                         action_requests.append(env_i)
                     except Exception as e:
                         print(f"[Environment Thread] Error generating action for env {env_i}: {e}")
@@ -347,7 +399,8 @@ def environment_thread(agent, rollout_steps, rollouts_queues, ready_queue, data_
                 time.sleep(0.1)  # Avoid busy waiting
                 continue
                 
-            print(f"[Environment Thread] Sent {len(action_requests)} actions, waiting for results")
+            if step % 10 == 0 or step == rollout_steps - 1:
+                print(f"[Environment Thread] Sent {len(action_requests)} actions, waiting for results")
             
             # Collect step results
             results_received = 0
@@ -384,6 +437,12 @@ def environment_thread(agent, rollout_steps, rollouts_queues, ready_queue, data_
                             
                             # Reset hidden state
                             hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
+                    elif result["type"] in ["reset_done", "initial_obs"]:
+                        # Handle reset result
+                        env_i = result["env_id"]
+                        obs_list[env_i] = result["obs"]
+                        done_list[env_i] = False
+                        hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
                     else:
                         print(f"[Environment Thread] Unexpected result type: {result['type']}")
                 except queue.Empty:
@@ -394,6 +453,49 @@ def environment_thread(agent, rollout_steps, rollouts_queues, ready_queue, data_
                 print(f"[Environment Thread] Warning: Only received {results_received}/{len(action_requests)} results")
             
             step_end_time = time.time()
+            step_duration = step_end_time - step_start_time
+            
+            if step % 10 == 0 or step == rollout_steps - 1:  # Log every 10 steps and last step
+                print(f"[Environment Thread] Step {step+1}/{rollout_steps} took {step_duration:.3f}s")
+        
+        # Count total valid transitions
+        total_transitions = sum(len(r["obs"]) for r in rollouts)
+        env_end_time = time.time()
+        env_duration = env_end_time - env_start_time
+        
+        print(f"[Environment Thread] Iteration {iteration} collected {total_transitions} total transitions "
+              f"across {num_envs} envs in {env_duration:.3f}s")
+        
+        if total_transitions == 0:
+            print("[Environment Thread] Warning: No transitions collected, something is wrong!")
+            # Try to reset environments and continue
+            for env_i in range(num_envs):
+                try:
+                    # Send reset command
+                    rollouts_queues[env_i].put({
+                        "action": None
+                    })
+                    print(f"[Environment Thread] Sent reset command to env {env_i}")
+                except Exception as e:
+                    print(f"[Environment Thread] Error sending reset to env {env_i}: {e}")
+            
+            # Wait for reset responses
+            for _ in range(num_envs):
+                try:
+                    result = data_queue.get(timeout=10.0)
+                    if result["type"] == "reset_done":
+                        env_i = result["env_id"]
+                        obs_list[env_i] = result["obs"]
+                        print(f"[Environment Thread] Reset env {env_i}")
+                except queue.Empty:
+                    print("[Environment Thread] Timeout waiting for reset responses")
+                    break
+                
+            # Skip sending this empty rollout
+            continue
+        
+        # Only send rollouts if they contain data
+        rollout_queue.put(rollouts)
             step_duration = step_end_time - step_start_time
             
             if step % 10 == 0 or step == rollout_steps - 1:  # Log every 10 steps and last step
