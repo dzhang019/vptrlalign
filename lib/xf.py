@@ -13,7 +13,6 @@ from lib import torch_util as tu
 from lib import util
 
 SENTINEL = 0.1337
-
 def attention(
     Q_bte,
     K_bTe,
@@ -179,7 +178,7 @@ def attention(
     # Compute weighted sum of values
     A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
     return A_bte
-    '''
+'''
 # def attention(Q_bte, K_bTe, V_bTe, dtype, mask=True, extra_btT=None, maxlen=None, check_sentinel=False, use_muP_factor=False):
 #     # print(f"Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
 #     b, t, e = Q_bte.shape
@@ -242,49 +241,49 @@ def attention(
 #         bias = bias + extra_btT
     
     # Handle bias shape for baddbmm operation
-    if isinstance(bias, th.Tensor) and bias.dim() > 0:
-        # Ensure bias has the right shape for bmm: [b, t, T]
-        if bias.shape[1] != Q_bte.shape[1] or bias.shape[2] != K_bTe.shape[1]:
-            # print(f"Adjusting bias shape from {bias.shape} to match Q={Q_bte.shape[1]}, K={K_bTe.shape[1]}")
-            # Create new bias with correct shape
-            new_bias = Q_bte.new_zeros((Q_bte.shape[0], Q_bte.shape[1], K_bTe.shape[1]), dtype=th.float32)
+    # if isinstance(bias, th.Tensor) and bias.dim() > 0:
+    #     # Ensure bias has the right shape for bmm: [b, t, T]
+    #     if bias.shape[1] != Q_bte.shape[1] or bias.shape[2] != K_bTe.shape[1]:
+    #         # print(f"Adjusting bias shape from {bias.shape} to match Q={Q_bte.shape[1]}, K={K_bTe.shape[1]}")
+    #         # Create new bias with correct shape
+    #         new_bias = Q_bte.new_zeros((Q_bte.shape[0], Q_bte.shape[1], K_bTe.shape[1]), dtype=th.float32)
             
-            # Fill with values from original bias where possible
-            min_dim1 = min(bias.shape[1], Q_bte.shape[1])
-            min_dim2 = min(bias.shape[2], K_bTe.shape[1])
-            new_bias[:, :min_dim1, :min_dim2] = bias[:, :min_dim1, :min_dim2]
+    #         # Fill with values from original bias where possible
+    #         min_dim1 = min(bias.shape[1], Q_bte.shape[1])
+    #         min_dim2 = min(bias.shape[2], K_bTe.shape[1])
+    #         new_bias[:, :min_dim1, :min_dim2] = bias[:, :min_dim1, :min_dim2]
             
-            # Fill rest with masked value if using masking
-            if mask:
-                # For causal masking, positions where query can't attend to key
-                if min_dim1 < Q_bte.shape[1] or min_dim2 < K_bTe.shape[1]:
-                    for i in range(Q_bte.shape[1]):
-                        valid_k = min(i+1, K_bTe.shape[1])
-                        new_bias[:, i, valid_k:] = -1e9
+    #         # Fill rest with masked value if using masking
+    #         if mask:
+    #             # For causal masking, positions where query can't attend to key
+    #             if min_dim1 < Q_bte.shape[1] or min_dim2 < K_bTe.shape[1]:
+    #                 for i in range(Q_bte.shape[1]):
+    #                     valid_k = min(i+1, K_bTe.shape[1])
+    #                     new_bias[:, i, valid_k:] = -1e9
             
-            bias = new_bias
+    #         bias = new_bias
     
     # Now bias should have shape [b, t, T] 
     # print(f"Final shapes - bias: {bias.shape}, Q: {Q_bte.shape}, K: {K_bTe.shape}")
     
     # Compute attention
-    logit_btT = th.baddbmm(
-        bias,
-        Q_bte.float(),
-        K_bTe.float().transpose(-1, -2),
-        alpha=(1 / e) if use_muP_factor else (1 / math.sqrt(e)),
-    )
+    # logit_btT = th.baddbmm(
+    #     bias,
+    #     Q_bte.float(),
+    #     K_bTe.float().transpose(-1, -2),
+    #     alpha=(1 / e) if use_muP_factor else (1 / math.sqrt(e)),
+    # )
     
-    if check_sentinel:
-        logit_btT = logit_btT - 1e9 * invalid.float()
+    # if check_sentinel:
+    #     logit_btT = logit_btT - 1e9 * invalid.float()
     
-    W_btT = th.softmax(logit_btT, dim=2).to(dtype)
+    # W_btT = th.softmax(logit_btT, dim=2).to(dtype)
     
-    if callable(V_bTe):
-        V_bTe = V_bTe()
+    # if callable(V_bTe):
+    #     V_bTe = V_bTe()
     
-    A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
-    return A_bte
+    # A_bte = th.einsum("btp,bpe->bte", W_btT, V_bTe)
+    # return A_bte
 
 
 class Attn:
