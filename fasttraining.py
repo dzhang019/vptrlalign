@@ -15,6 +15,7 @@ from data_loader import DataLoader
 from lib.tree_util import tree_map
 
 from lib.height import reward_function
+from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
@@ -54,7 +55,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
     done_list = [False] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
-    
+    visited_chunks_list = [set() for _ in range(num_envs)]
     iteration = 0
     while not stop_flag[0]:
         iteration += 1
@@ -95,14 +96,18 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     if "error" in info_i:
                         print(f"[Env {env_i}] Error in info: {info_i['error']}")
                         done_flag_i = True
+                    custom_reward, visited_chunks_list[env_i] = custom_reward_function(
+                            next_obs_i, done_flag_i, info_i, visited_chunks_list[env_i]
+                    )
                     
+                    # Apply death penalty
                     if done_flag_i:
-                        env_reward_i += -1000.0  # DEATH_PENALTY
+                        custom_reward += -1000.0  # DEATH_PENALTY
                     
                     # Store rollout data
                     rollouts[env_i]["obs"].append(obs_list[env_i])
                     rollouts[env_i]["actions"].append(minerl_action_i)
-                    rollouts[env_i]["rewards"].append(env_reward_i)
+                    rollouts[env_i]["rewards"].append(custom_reward)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
                         tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_i])
@@ -128,6 +133,10 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                         obs_list[env_i] = envs[env_i].reset()
                         done_list[env_i] = False
                         hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
+
+                        visited_chunks_list[env_i] = set()
+                    else:
+                        episode_step_counts[env_i] += 1
         
         # Send the collected rollouts to the training thread
         env_end_time = time.time()
@@ -143,7 +152,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     # Hyperparameters
     LEARNING_RATE = 3e-7
     MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 50.0
+    LAMBDA_KL = 10.0
     GAMMA = 0.9999
     LAM = 0.95
     VALUE_LOSS_COEF = 0.5

@@ -19,7 +19,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
 
     # Health-related rewards and penalties
     if not done:
-        reward += 0.1  # Reward for staying alive
+        reward += 0.2  # Reward for staying alive
     if "life_stats" in obs:
         life_stats = obs["life_stats"]
         if life_stats.get("life", 20) < 10:  # Assuming 20 is max health
@@ -35,7 +35,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
 
     current_chunk = (int(xpos) // 16, int(zpos) // 16)
     if current_chunk not in visited_chunks:
-        reward += 5  # Reward for exploring new chunks
+        reward += 30  # Reward for exploring new chunks
         visited_chunks.add(current_chunk)
 
     # Exploration reward: New depths
@@ -47,7 +47,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
     # Exploration reward: New biomes
     biome_id = info.get("biome_id", None)
     if biome_id is not None and biome_id not in visited_chunks:
-        reward += 3  # Reward for discovering new biomes
+        reward += 100  # Reward for discovering new biomes
         visited_chunks.add(biome_id)
 
     return reward, visited_chunks
