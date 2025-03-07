@@ -476,6 +476,7 @@ def train_rl_mp(
         p.daemon = True
         p.start()
         workers.append(p)
+        time.sleep(0.5)
     
     # Thread stop flag (for clean shutdown)
     thread_stop = [False]
