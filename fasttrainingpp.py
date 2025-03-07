@@ -79,7 +79,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             
             # Apply death penalty if done
             if done:
-                custom_reward -= 1000.0
+                custom_reward -= 2000.0
                 
             # Increment step count
             episode_step_count += 1
@@ -220,7 +220,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
 # Modified training thread to maintain sequence integrity in both forward and backward passes
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
     # Hyperparameters
-    LEARNING_RATE = 3e-7
+    LEARNING_RATE = 2e-5
     MAX_GRAD_NORM = 1.0
     LAMBDA_KL = 10.0
     GAMMA = 0.9999
