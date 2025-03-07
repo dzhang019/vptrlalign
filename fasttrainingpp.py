@@ -217,8 +217,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         
         rollout_queue.put(rollouts)
 
-
-# Modified training thread to maintain sequence integrity
+# Modified training thread to maintain sequence integrity in both forward and backward passes
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
     # Hyperparameters
     LEARNING_RATE = 3e-7
@@ -248,15 +247,18 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         train_start = time.time()
         print(f"[Training Thread] Processing rollouts for iteration {iteration}")
         
-        # Process each environment separately to maintain sequence integrity
+        # Reset optimizer gradients once before processing all environments
         optimizer.zero_grad()
-        total_loss = 0
+        
+        # Track statistics for reporting
+        total_loss_val = 0
         total_policy_loss = 0
         total_value_loss = 0
         total_kl_loss = 0
         valid_envs = 0
         total_transitions = 0
         
+        # Process each environment separately
         for env_i, env_rollout in enumerate(rollouts):
             # Skip empty rollouts
             if len(env_rollout["obs"]) == 0:
@@ -302,8 +304,11 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 # Total loss for this environment
                 env_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
             
-            # Accumulate losses and statistics
-            total_loss += env_loss
+            # Separate backward pass for each environment to maintain sequence integrity
+            scaler.scale(env_loss).backward()
+            
+            # Accumulate statistics for reporting
+            total_loss_val += env_loss.item()
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
             total_kl_loss += kl_loss.item()
@@ -320,8 +325,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         avg_value_loss = total_value_loss / valid_envs
         avg_kl_loss = total_kl_loss / valid_envs
         
-        # Backward pass on accumulated loss
-        scaler.scale(total_loss).backward()
+        # Apply gradients that were already accumulated from each environment's backward pass
         scaler.unscale_(optimizer)
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
         scaler.step(optimizer)
@@ -333,10 +337,9 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
               f"to process and train on {total_transitions} transitions from {valid_envs} environments.")
         
         # Update stats
-        total_loss_val = total_loss.item()
         running_loss += total_loss_val
         total_steps += total_transitions
-        avg_loss = running_loss / valid_envs
+        avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
         LAMBDA_KL *= KL_DECAY
         
         print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
