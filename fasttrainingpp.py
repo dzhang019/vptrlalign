@@ -88,7 +88,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             result_queue.put((env_id, action, next_obs, done, custom_reward, info))
             
             # Render (only first environment)
-            if env_id == 0 and episode_step_count % 10 == 0:
+            if env_id == 0:
                 env.render()
             
             # Reset if episode is done
