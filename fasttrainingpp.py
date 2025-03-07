@@ -323,7 +323,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
                 stochastic=False,
                 taken_action=None
             )
-        bootstrap_value = v_next.item()
+            bootstrap_value = v_next.item()
     else:
         bootstrap_value = 0.0
         
@@ -849,3 +849,12 @@ def train_rl_threaded(
             print("Warning: Environment thread did not terminate properly")
         
         # Close environments
+        for env in envs:
+            env.close()
+        
+        # Close dummy environment
+        dummy_env.close()
+        
+        # Save weights
+        print(f"Saving fine-tuned weights to {out_weights}")
+        th.save(agent.policy.state_dict(), out_weights)
