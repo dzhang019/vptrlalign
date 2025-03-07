@@ -4,7 +4,8 @@ import time
 import threading
 import queue
 import multiprocessing as mp
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Value
+import ctypes
 
 import gym
 import minerl
@@ -12,13 +13,9 @@ import torch as th
 import numpy as np
 
 from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
-from data_loader import DataLoader
 from lib.tree_util import tree_map
-
-from lib.height import reward_function
 from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
-from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
@@ -46,85 +43,148 @@ class RolloutQueue:
         return self.queue.qsize()
 
 
-# Function run in each environment process
+# Environment worker process function
 def env_worker(env_id, action_queue, result_queue, stop_flag):
-    # Create environment
-    env = HumanSurvival(**ENV_KWARGS).make()
+    """
+    Worker process for running a single environment
     
-    # Initialize
-    obs = env.reset()
-    visited_chunks = set()
-    episode_step_count = 0
+    Args:
+        env_id: ID for this environment
+        action_queue: Queue to receive actions from main process
+        result_queue: Queue to send results back to main process
+        stop_flag: Shared flag to signal process to stop
+    """
+    try:
+        # Create environment
+        env = HumanSurvival(**ENV_KWARGS).make()
+        
+        # Initialize state
+        obs = env.reset()
+        visited_chunks = set()
+        episode_step_count = 0
+        
+        print(f"[Env {env_id}] Started")
+        
+        # Send initial observation
+        result_queue.put((env_id, None, obs, False, 0, None))
+        
+        while not stop_flag.value:
+            try:
+                # Get action from main process
+                action = action_queue.get(timeout=1.0)
+                
+                if action is None:  # Signal to terminate
+                    break
+                    
+                # Step environment
+                next_obs, env_reward, done, info = env.step(action)
+                
+                # Calculate custom reward
+                custom_reward, visited_chunks = custom_reward_function(
+                    next_obs, done, info, visited_chunks
+                )
+                
+                # Apply death penalty if done
+                if done:
+                    custom_reward -= 1000.0
+                    
+                # Update counter
+                episode_step_count += 1
+                
+                # Send results back to main process
+                result_queue.put((env_id, action, next_obs, done, custom_reward, info))
+                
+                # Render occasionally for visualization (only first environment)
+                if env_id == 0 and episode_step_count % 10 == 0:
+                    env.render()
+                
+                # Reset if episode done
+                if done:
+                    # Send episode completion signal
+                    result_queue.put((env_id, None, None, True, episode_step_count, None))
+                    
+                    # Reset environment
+                    obs = env.reset()
+                    visited_chunks = set()
+                    episode_step_count = 0
+                    
+                    # Send new observation
+                    result_queue.put((env_id, None, obs, False, 0, None))
+                else:
+                    # Update observation
+                    obs = next_obs
+                    
+            except queue.Empty:
+                # Timeout waiting for action, just continue
+                continue
+                
+            except Exception as e:
+                import traceback
+                print(f"[Env {env_id}] Error: {e}")
+                print(traceback.format_exc())
+                
+                # Try to recover by resetting
+                try:
+                    obs = env.reset()
+                    visited_chunks = set()
+                    episode_step_count = 0
+                    result_queue.put((env_id, None, obs, False, 0, None))
+                except:
+                    pass
+                    
+    except Exception as e:
+        import traceback
+        print(f"[Env {env_id}] Critical error: {e}")
+        print(traceback.format_exc())
     
-    print(f"[Env {env_id}] Started")
-    
-    # Send initial observation to main process
-    result_queue.put((env_id, None, obs, False, 0, None))
-    
-    while not stop_flag.value:
+    finally:
+        # Clean up
         try:
-            # Get action from queue
-            action = action_queue.get(timeout=1.0)
+            env.close()
+        except:
+            pass
             
-            if action is None:  # Signal to terminate
-                break
-                
-            # Step environment
-            next_obs, env_reward, done, info = env.step(action)
-            
-            # Calculate custom reward
-            custom_reward, visited_chunks = custom_reward_function(
-                next_obs, done, info, visited_chunks
-            )
-            
-            # Apply death penalty if done
-            if done:
-                custom_reward -= 1000.0
-                
-            # Increment step count
-            episode_step_count += 1
-            
-            # Send results back
-            result_queue.put((env_id, action, next_obs, done, custom_reward, info))
-            
-            # Render (only first environment)
-            if env_id == 0 and episode_step_count % 10 == 0:
-                env.render()
-            
-            # Reset if episode is done
-            if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
-                obs = env.reset()
-                visited_chunks = set()
-                episode_step_count = 0
-                result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
-            else:
-                obs = next_obs
-                
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"[Env {env_id}] Error: {e}")
-            
-    # Clean up
-    env.close()
-    print(f"[Env {env_id}] Stopped")
+        print(f"[Env {env_id}] Stopped")
 
 
 # Thread for coordinating environments and collecting rollouts
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, out_episodes, stop_flag, num_envs):
-    # Initialize tracking variables
+    """
+    Thread that coordinates multiple environment processes and collects rollouts
+    
+    Args:
+        agent: The agent model for action generation
+        rollout_steps: Number of steps per rollout
+        action_queues: List of queues to send actions to each environment
+        result_queue: Queue to receive results from environments
+        rollout_queue: Queue to send completed rollouts to training thread
+        out_episodes: Path to file for episode length logging
+        stop_flag: Flag to signal thread to stop
+        num_envs: Number of environments
+    """
+    # Initialize state tracking for each environment
     obs_list = [None] * num_envs
-    done_list = [False] * num_envs
-    episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
     # Wait for initial observations from all environments
-    for _ in range(num_envs):
-        env_id, _, obs, _, _, _ = result_queue.get()
-        obs_list[env_id] = obs
-        print(f"[Environment Thread] Got initial observation from env {env_id}")
+    print(f"[Environment Thread] Waiting for initial observations from {num_envs} environments")
+    envs_ready = 0
+    while envs_ready < num_envs:
+        try:
+            env_id, _, obs, _, _, _ = result_queue.get(timeout=10.0)
+            obs_list[env_id] = obs
+            envs_ready += 1
+            print(f"[Environment Thread] Got initial observation from env {env_id} ({envs_ready}/{num_envs})")
+        except queue.Empty:
+            print(f"[Environment Thread] Timeout waiting for initial observations ({envs_ready}/{num_envs})")
+            break
     
+    # Check if all environments provided observations
+    missing_obs = [i for i, obs in enumerate(obs_list) if obs is None]
+    if missing_obs:
+        print(f"[Environment Thread] Warning: Missing initial observations from environments: {missing_obs}")
+    
+    # Main loop
     iteration = 0
     while not stop_flag[0]:
         iteration += 1
@@ -143,69 +203,90 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             for _ in range(num_envs)
         ]
         
+        print(f"[Environment Thread] Starting iteration {iteration}, collecting {rollout_steps} steps per env")
+        
         # Collect rollouts
         for step in range(rollout_steps):
-            # For each environment, generate action and send it
+            # Generate and send actions for all environments
             for env_id in range(num_envs):
                 if obs_list[env_id] is not None:
-                    # Generate action using agent
-                    with th.no_grad():
-                        minerl_action, _, _, _, new_hid = agent.get_action_and_training_info(
-                            minerl_obs=obs_list[env_id],
-                            hidden_state=hidden_states[env_id],
-                            stochastic=True,
-                            taken_action=None
-                        )
-                    
-                    # Update hidden state
-                    hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-                    
-                    # Send action to environment
-                    action_queues[env_id].put(minerl_action)
+                    try:
+                        # Generate action using agent
+                        with th.no_grad():
+                            minerl_action, _, _, _, new_hid = agent.get_action_and_training_info(
+                                minerl_obs=obs_list[env_id],
+                                hidden_state=hidden_states[env_id],
+                                stochastic=True,
+                                taken_action=None
+                            )
+                        
+                        # Update hidden state
+                        hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                        
+                        # Send action to environment
+                        action_queues[env_id].put(minerl_action)
+                    except Exception as e:
+                        print(f"[Environment Thread] Error generating action for env {env_id}: {e}")
             
             # Collect results from all environments
-            pending_results = num_envs
-            while pending_results > 0:
+            results_received = 0
+            expected_results = sum(1 for obs in obs_list if obs is not None)
+            
+            if expected_results == 0:
+                print("[Environment Thread] No valid environments to step")
+                time.sleep(0.1)
+                continue
+                
+            while results_received < expected_results:
                 try:
                     env_id, action, next_obs, done, reward, info = result_queue.get(timeout=5.0)
                     
-                    # Check if this is an episode completion signal
+                    # Handle different types of messages
                     if action is None and done and next_obs is None:
-                        # This is an episode completion notification
-                        episode_length = reward  # Using reward field to pass episode length
-                        with open(out_episodes, "a") as f:
-                            f.write(f"{episode_length}\n")
-                        continue  # Don't decrement pending_results, we'll get a new obs
+                        # Episode completion message
+                        episode_length = reward  # reward field contains episode length
+                        try:
+                            with open(out_episodes, "a") as f:
+                                f.write(f"{episode_length}\n")
+                        except Exception as e:
+                            print(f"[Environment Thread] Error writing episode length: {e}")
+                        continue
                     
-                    # Check if this is an observation update without stepping
-                    if action is None and not done:
+                    elif action is None and not done:
+                        # Initial observation or reset message
                         obs_list[env_id] = next_obs
-                        continue  # Don't decrement pending_results
+                        continue
                     
-                    # Normal step result - store in rollout
-                    rollouts[env_id]["obs"].append(obs_list[env_id])
-                    rollouts[env_id]["actions"].append(action)
-                    rollouts[env_id]["rewards"].append(reward)
-                    rollouts[env_id]["dones"].append(done)
-                    rollouts[env_id]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id])
-                    )
-                    rollouts[env_id]["next_obs"].append(next_obs)
-                    
-                    # Update state
-                    obs_list[env_id] = next_obs
-                    
-                    # Reset hidden state if done
-                    if done:
-                        hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
-                    
-                    pending_results -= 1
-                    
+                    else:
+                        # Normal step result
+                        rollouts[env_id]["obs"].append(obs_list[env_id])
+                        rollouts[env_id]["actions"].append(action)
+                        rollouts[env_id]["rewards"].append(reward)
+                        rollouts[env_id]["dones"].append(done)
+                        rollouts[env_id]["hidden_states"].append(
+                            tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id])
+                        )
+                        rollouts[env_id]["next_obs"].append(next_obs)
+                        
+                        # Update state
+                        obs_list[env_id] = next_obs
+                        
+                        # Reset hidden state if episode ended
+                        if done:
+                            hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
+                        
+                        # Count as processed result
+                        results_received += 1
+                
                 except queue.Empty:
                     print(f"[Environment Thread] Timeout waiting for results in step {step}")
                     break
+            
+            # Log progress occasionally
+            if step % 10 == 0 or step == rollout_steps - 1:
+                print(f"[Environment Thread] Completed step {step+1}/{rollout_steps}")
         
-        # Send collected rollouts to training thread
+        # End of rollout collection
         end_time = time.time()
         duration = end_time - start_time
         
@@ -213,14 +294,33 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         total_transitions = sum(len(r["obs"]) for r in rollouts)
         
         print(f"[Environment Thread] Iteration {iteration} collected {total_transitions} transitions "
-              f"across {num_envs} envs in {duration:.3f}s")
+              f"across {num_envs} environments in {duration:.3f}s")
         
+        # Skip empty rollouts
+        if total_transitions == 0:
+            print("[Environment Thread] No transitions collected, skipping update")
+            continue
+        
+        # Send rollouts to training thread
         rollout_queue.put(rollouts)
 
 
 # Thread for training the agent
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
-    # Hyperparameters (same as original)
+    """
+    Thread for processing rollouts and training the agent
+    
+    This implementation maintains sequential integrity of each environment
+    by processing them separately during training.
+    
+    Args:
+        agent: The agent model to train
+        pretrained_policy: Reference policy for KL divergence
+        rollout_queue: Queue to receive rollouts from environment thread
+        stop_flag: Flag to signal thread to stop
+        num_iterations: Maximum number of training iterations
+    """
+    # Hyperparameters
     LEARNING_RATE = 3e-7
     MAX_GRAD_NORM = 1.0
     LAMBDA_KL = 10.0
@@ -243,18 +343,27 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         wait_start = time.time()
         rollouts = rollout_queue.get()
         wait_duration = time.time() - wait_start
-        print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+        print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts")
         
         train_start = time.time()
         print(f"[Training Thread] Processing rollouts for iteration {iteration}")
         
-        # Process rollouts
-        transitions_all = []
+        # Process each environment's rollout separately, but accumulate gradients
+        optimizer.zero_grad()
+        total_loss = 0
+        total_policy_loss = 0
+        total_value_loss = 0
+        total_kl_loss = 0
+        env_count = 0
+        transitions_count = 0
+        
         for env_i, env_rollout in enumerate(rollouts):
+            # Skip empty rollouts
             if len(env_rollout["obs"]) == 0:
                 print(f"[Training Thread] Environment {env_i} has no transitions, skipping")
                 continue
-                
+            
+            # Process this environment's rollout
             env_transitions = train_unroll(
                 agent,
                 pretrained_policy,
@@ -262,60 +371,84 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 gamma=GAMMA,
                 lam=LAM
             )
-            transitions_all.extend(env_transitions)
+            
+            if len(env_transitions) == 0:
+                continue
+                
+            # Process transitions for this environment
+            env_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in env_transitions])
+            env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
+            env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
+            env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
+            
+            # Normalize advantages for this environment
+            env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
+            
+            # Compute losses for this environment
+            with autocast():
+                # Policy loss
+                policy_loss = -(env_advantages * env_log_probs).mean()
+                
+                # Value function loss
+                value_loss = ((env_v_preds - env_returns) ** 2).mean()
+                
+                # KL divergence loss
+                kl_losses = []
+                for t in env_transitions:
+                    kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                    kl_losses.append(kl_loss)
+                kl_loss = th.stack(kl_losses).mean()
+                
+                # Total loss for this environment
+                env_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+            
+            # Accumulate losses
+            total_loss += env_loss
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+            total_kl_loss += kl_loss.item()
+            env_count += 1
+            transitions_count += len(env_transitions)
         
-        if len(transitions_all) == 0:
-            print(f"[Training Thread] No transitions collected, skipping update.")
+        # Skip update if no valid transitions
+        if env_count == 0:
+            print(f"[Training Thread] No valid transitions, skipping update")
             continue
         
-        # Batch processing (same as original)
-        batch_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in transitions_all])
-        batch_returns = th.tensor([t["return"] for t in transitions_all], device="cuda")
-        batch_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in transitions_all])
-        batch_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in transitions_all])
+        # Average losses
+        avg_policy_loss = total_policy_loss / env_count
+        avg_value_loss = total_value_loss / env_count
+        avg_kl_loss = total_kl_loss / env_count
         
-        # Compute losses (same as original)
-        optimizer.zero_grad()
-        
-        with autocast():
-            policy_loss = -(batch_advantages * batch_log_probs).mean()
-            value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
-            
-            kl_losses = []
-            for t in transitions_all:
-                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
-                kl_losses.append(kl_loss)
-            kl_loss = th.stack(kl_losses).mean()
-            
-            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
-        
-        # Backpropagate
+        # Backpropagate combined loss
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
         scaler.step(optimizer)
         scaler.update()
         
-        train_duration = time.time() - train_start
-        
-        print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
-              f"to process and train on {len(transitions_all)} transitions.")
+        train_end = time.time()
+        train_duration = train_end - train_start
         
         # Update stats
         total_loss_val = total_loss.item()
-        running_loss += total_loss_val * len(transitions_all)
-        total_steps += len(transitions_all)
+        running_loss += total_loss_val
+        total_steps += transitions_count
         avg_loss = (running_loss / total_steps) if total_steps > 0 else 0.0
         LAMBDA_KL *= KL_DECAY
         
+        print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
+              f"to process and train on {transitions_count} transitions from {env_count} environments")
+        
         print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
-              f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
-              f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
+              f"Loss={total_loss_val:.4f}, PolicyLoss={avg_policy_loss:.4f}, "
+              f"ValueLoss={avg_value_loss:.4f}, KLLoss={avg_kl_loss:.4f}, "
               f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
 
 
 # Keep train_unroll function exactly the same as the original
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
+    """Process a rollout into transitions for training - unchanged from original"""
     transitions = []
     T = len(rollout["obs"])
     if T == 0:
@@ -398,7 +531,17 @@ def train_rl_mp(
     queue_size=3
 ):
     """
-    Multiprocessing version with separate processes for environment stepping
+    Train an RL agent using multiprocessing for environment parallelism
+    
+    Args:
+        in_model: Path to input model parameters file
+        in_weights: Path to input weights file
+        out_weights: Path to output weights file
+        out_episodes: Path to episode length logging file
+        num_iterations: Number of training iterations
+        rollout_steps: Number of steps per rollout
+        num_envs: Number of parallel environments
+        queue_size: Size of rollout queue between environment and training threads
     """
     # Set spawn method for multiprocessing
     try:
@@ -406,11 +549,14 @@ def train_rl_mp(
     except RuntimeError:
         print("Multiprocessing start method already set")
     
-    # Create dummy environment for agent initialization
+    print(f"Starting training with {num_envs} environments, {rollout_steps} steps per rollout")
+    
+    # Create dummy environment for initialization
     dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
-    # Create agent for main thread
+    # Create agent
+    print("Creating agent...")
     agent = MineRLAgent(
         dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
@@ -419,6 +565,7 @@ def train_rl_mp(
     agent.load_weights(in_weights)
     
     # Create pretrained policy for KL divergence
+    print("Creating pretrained policy...")
     pretrained_policy = MineRLAgent(
         dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
@@ -426,13 +573,18 @@ def train_rl_mp(
     )
     pretrained_policy.load_weights(in_weights)
     
-    # Create multiprocessing shared objects
-    stop_flag = mp.Value('b', False)
+    # Create communication channels
+    print("Setting up communication channels...")
+    stop_flag = Value(ctypes.c_bool, False)
     action_queues = [Queue() for _ in range(num_envs)]
     result_queue = Queue()
     rollout_queue = RolloutQueue(maxsize=queue_size)
     
+    # Thread stop flag (Python list for thread access)
+    thread_stop = [False]
+    
     # Start environment worker processes
+    print("Starting environment processes...")
     workers = []
     for env_id in range(num_envs):
         p = Process(
@@ -442,11 +594,13 @@ def train_rl_mp(
         p.daemon = True
         p.start()
         workers.append(p)
+        print(f"Started environment process {env_id}, pid: {p.pid}")
     
-    # Thread stop flag (for clean shutdown)
-    thread_stop = [False]
+    # Wait for processes to initialize
+    time.sleep(2)
     
     # Create and start threads
+    print("Starting coordinator threads...")
     env_thread = threading.Thread(
         target=environment_thread,
         args=(
@@ -466,7 +620,6 @@ def train_rl_mp(
         args=(agent, pretrained_policy, rollout_queue, thread_stop, num_iterations)
     )
     
-    print("Starting threads...")
     env_thread.start()
     train_thread.start()
     
@@ -477,7 +630,7 @@ def train_rl_mp(
         print("Interrupted by user, stopping threads and processes...")
     finally:
         # Signal threads and processes to stop
-        print("Setting stop flag...")
+        print("Setting stop flags...")
         thread_stop[0] = True
         stop_flag.value = True
         
@@ -491,14 +644,19 @@ def train_rl_mp(
         # Wait for threads to finish
         print("Waiting for threads to finish...")
         env_thread.join(timeout=10)
+        if env_thread.is_alive():
+            print("Warning: Environment thread did not terminate properly")
+        
         train_thread.join(timeout=5)
+        if train_thread.is_alive():
+            print("Warning: Training thread did not terminate properly")
         
         # Wait for workers to finish
         print("Waiting for worker processes to finish...")
         for i, p in enumerate(workers):
             p.join(timeout=5)
             if p.is_alive():
-                print(f"Worker {i} did not terminate, force killing...")
+                print(f"Worker {i} did not terminate, force terminating...")
                 p.terminate()
         
         # Close dummy environment
@@ -507,6 +665,7 @@ def train_rl_mp(
         # Save weights
         print(f"Saving weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
+        print("Done!")
 
 
 if __name__ == "__main__":
@@ -519,7 +678,7 @@ if __name__ == "__main__":
     parser.add_argument("--rollout-steps", required=False, type=int, default=40)
     parser.add_argument("--num-envs", required=False, type=int, default=4)
     parser.add_argument("--queue-size", required=False, type=int, default=3,
-                       help="Size of the queue between environment and training threads")
+                      help="Size of the queue between environment and training threads")
 
     args = parser.parse_args()
 
