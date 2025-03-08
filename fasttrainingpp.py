@@ -557,7 +557,13 @@ if __name__ == "__main__":
                        help="Size of the queue between environment and training threads")
 
     args = parser.parse_args()
+    weights = th.load(args.in_weights, map_location="cpu")
+    print("Weight keys:", weights.keys())
 
+    # Look for any keys that might suggest an auxiliary value head
+    for key in weights.keys():
+        if "auxiliary" in key or "aux" in key:
+            print(f"Possible auxiliary head key: {key}")
     train_rl_mp(
         in_model=args.in_model,
         in_weights=args.in_weights,
