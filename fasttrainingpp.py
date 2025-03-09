@@ -449,154 +449,116 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             # Signal start of auxiliary phase
             phase_coordinator.start_auxiliary_phase()
             print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
-            aux_data = {}
-            # Use only a limited number of most recent rollouts
-            max_rollouts = 10  # Process far fewer rollouts to save memory
+            
+            # Use only a limited number of recent rollouts
+            max_rollouts = 5  # Limit number of rollouts for memory
             recent_rollouts = []
             
-            # Take one rollout from each environment from the most recent iteration
-            if stored_rollouts:
-                recent_set = stored_rollouts[-1]
-                for env_rollout in recent_set:
+            # Get most recent rollouts
+            for rollout_set in reversed(stored_rollouts):
+                for env_rollout in rollout_set:
                     if len(env_rollout["obs"]) > 0:
                         recent_rollouts.append(env_rollout)
                         if len(recent_rollouts) >= max_rollouts:
                             break
+                if len(recent_rollouts) >= max_rollouts:
+                    break
+            
+            # Reverse to restore chronological order
+            recent_rollouts.reverse()
             
             print(f"[Training Thread] Using {len(recent_rollouts)} rollouts for auxiliary phase")
             
-            # Skip if no valid rollouts
-            if not recent_rollouts:
-                print("[Training Thread] No valid rollouts for auxiliary phase, skipping")
-                phase_coordinator.end_auxiliary_phase()
-                pi_update_counter = 0
-                stored_rollouts = []
-                continue
+            # Store original distributions
+            original_dists_by_rollout = {}
             
-            # Perform 2 sleep cycles with much smaller chunks and CPU offloading
+            # First pass - capture original policy distributions
+            for rollout_idx, rollout in enumerate(recent_rollouts):
+                # Process this rollout to get original distributions
+                print(f"[Training Thread] Getting original distributions for rollout {rollout_idx+1}/{len(recent_rollouts)}")
+                
+                # Process the entire sequence to get original distributions
+                transitions = train_unroll(agent, pretrained_policy, rollout, gamma=GAMMA, lam=LAM)
+                
+                if len(transitions) == 0:
+                    continue
+                    
+                # Store original policy distributions
+                original_dists = []
+                for t in transitions:
+                    original_dists.append({k: v.clone().detach().cpu() for k, v in t["cur_pd"].items()})
+                
+                # Save original distributions keyed by rollout id
+                original_dists_by_rollout[id(rollout)] = (transitions, original_dists)
+                
+                # Clear memory
+                torch.cuda.empty_cache()
+            
+            # Now do 2 sleep cycles
             for sleep_cycle in range(2):
                 print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2")
+                
+                # Stats tracking
                 total_aux_value_loss = 0.0
                 total_policy_distill_loss = 0.0
-                total_processed = 0
+                total_transitions = 0
                 
-                # Process one rollout at a time, completely
+                # Process each rollout
                 for rollout_idx, rollout in enumerate(recent_rollouts):
-                    # Skip after processing a few rollouts if memory is tight
-                    if rollout_idx >= 5 and sleep_cycle > 0:
-                        continue
-                        
-                    # Get transitions - but use a simpler method for the second sleep cycle
-                    if sleep_cycle == 0:
-                        # First sleep cycle - compute transitions and store raw observations
-                        with th.no_grad():
-                            # Process rollout to get transitions
-                            transitions = train_unroll(agent, pretrained_policy, rollout, gamma=GAMMA, lam=LAM)
-                            
-                            if not transitions:
-                                continue
-                            
-                            # Store original policy distributions separately
-                            # Use CPU storage to save GPU memory
-                            rollout_id = id(rollout)
-                            obs_list = [t["obs"] for t in transitions]
-                            returns = [t["return"] for t in transitions]
-                            
-                            # Create storage for this rollout
-                            if rollout_idx < 5:  # Only store for first few rollouts
-                                # Get original policy distributions for each observation
-                                orig_button_logits = []
-                                orig_camera_logits = []
-                                
-                                for t in transitions:
-                                    # Move policy distributions to CPU to save memory
-                                    for k, v in t["cur_pd"].items():
-                                        orig_logits = v.clone().cpu()
-                                        if k == "buttons":
-                                            orig_button_logits.append(orig_logits)
-                                        elif k == "camera":
-                                            orig_camera_logits.append(orig_logits)
-                                
-                                # Store data
-                                aux_data[rollout_id] = {
-                                    'obs': obs_list,
-                                    'returns': returns,
-                                    'orig_button_logits': orig_button_logits,
-                                    'orig_camera_logits': orig_camera_logits
-                                }
-                    
-                    # For both sleep cycles, process in very small chunks
                     rollout_id = id(rollout)
                     
-                    # Skip if no data for this rollout
-                    if sleep_cycle > 0 and (rollout_id not in aux_data or rollout_idx >= 5):
+                    # Skip if no original distributions
+                    if rollout_id not in original_dists_by_rollout:
                         continue
                         
-                    # Get stored observations and returns
-                    obs_list = aux_data[rollout_id]['obs'] if rollout_id in aux_data else []
-                    returns = aux_data[rollout_id]['returns'] if rollout_id in aux_data else []
+                    transitions, original_dists = original_dists_by_rollout[rollout_id]
                     
-                    # Process in very small chunks to minimize memory usage
-                    chunk_size = 10  # Much smaller chunks
-                    for chunk_start in range(0, len(obs_list), chunk_size):
-                        # Clear memory before processing each chunk
-                        th.cuda.empty_cache()
+                    # On second cycle, get fresh policy distributions
+                    if sleep_cycle > 0:
+                        # Re-run forward pass for the whole sequence
+                        obs_seq = [t["obs"] for t in transitions]
                         
-                        chunk_end = min(chunk_start + chunk_size, len(obs_list))
-                        chunk_obs = obs_list[chunk_start:chunk_end]
-                        chunk_returns = returns[chunk_start:chunk_end]
+                        # Get sequence data with updated policy parameters
+                        pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, _ = agent.get_sequence_and_training_info(
+                            minerl_obs_list=obs_seq,
+                            initial_hidden_state=agent.policy.initial_state(1),
+                            stochastic=False,
+                            taken_actions_list=None
+                        )
                         
+                        # Update current policy distributions
+                        for i, t in enumerate(transitions):
+                            t["cur_pd"] = {k: v[i].clone() for k, v in pi_dist_seq.items()}
+                            t["aux_v_pred"] = aux_vpred_seq[i]
+                    
+                    # Process in small chunks
+                    chunk_size = 20  # Smaller chunks
+                    for chunk_start in range(0, len(transitions), chunk_size):
+                        chunk_end = min(chunk_start + chunk_size, len(transitions))
+                        chunk_transitions = transitions[chunk_start:chunk_end]
+                        
+                        # Zero gradients
                         optimizer.zero_grad()
                         
-                        # Get current auxiliary value predictions
-                        aux_vpreds = []
-                        current_pd_dict = {'buttons': [], 'camera': []}
-                        
-                        # Forward pass for each observation
-                        for obs in chunk_obs:
-                            with th.no_grad():
-                                # Get policy predictions
-                                agent_input = agent._env_obs_to_agent(obs)
-                                _, _, result = agent.policy.act_train(
-                                    agent_input, agent._dummy_first, None, return_pd=True
-                                )
-                                
-                                # Extract predictions
-                                aux_vpreds.append(result["aux_vpred"])
-                                
-                                # Extract policy distributions
-                                for k, v in result["pd"].items():
-                                    current_pd_dict[k].append(v)
-                        
-                        # Convert to tensors
-                        aux_vpreds = th.stack(aux_vpreds)
-                        returns_tensor = th.tensor(chunk_returns, device="cuda")
+                        # Extract returns and predictions for this chunk
+                        returns = torch.tensor([t["return"] for t in chunk_transitions], device="cuda")
+                        aux_vpreds = torch.cat([t["aux_v_pred"].unsqueeze(0) for t in chunk_transitions])
                         
                         with autocast():
                             # Auxiliary value loss
-                            aux_value_loss = ((aux_vpreds - returns_tensor) ** 2).mean()
+                            aux_value_loss = ((aux_vpreds - returns) ** 2).mean()
                             
-                            # Policy distillation loss
-                            if sleep_cycle > 0 and rollout_id in aux_data:
+                            # Policy distillation loss (on second cycle)
+                            if sleep_cycle > 0:
                                 policy_distill_losses = []
-                                
-                                # Get original logits for this chunk
-                                orig_button_chunk = aux_data[rollout_id]['orig_button_logits'][chunk_start:chunk_end]
-                                orig_camera_chunk = aux_data[rollout_id]['orig_camera_logits'][chunk_start:chunk_end]
-                                
-                                # Create dictionary format for KL calculation
-                                for i in range(len(chunk_obs)):
-                                    cur_pd = {
-                                        'buttons': current_pd_dict['buttons'][i],
-                                        'camera': current_pd_dict['camera'][i]
-                                    }
+                                for i, t in enumerate(chunk_transitions):
+                                    # Current policy distribution
+                                    cur_pd = t["cur_pd"]
                                     
-                                    orig_pd = {
-                                        'buttons': orig_button_chunk[i].to("cuda"),
-                                        'camera': orig_camera_chunk[i].to("cuda")
-                                    }
+                                    # Original policy distribution (from CPU to GPU)
+                                    orig_pd = {k: v.to("cuda") for k, v in original_dists[chunk_start + i].items()}
                                     
-                                    # Debug the first sample
+                                    # Debug first transition
                                     if rollout_idx == 0 and chunk_start == 0 and i == 0:
                                         pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"SLEEP-{sleep_cycle+1}")
                                     else:
@@ -604,42 +566,41 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                                     
                                     policy_distill_losses.append(pd_loss)
                                 
-                                if policy_distill_losses:
-                                    policy_distill_loss = th.stack(policy_distill_losses).mean()
-                                    loss = 0.5 * aux_value_loss + 1.0 * policy_distill_loss
-                                    
-                                    total_policy_distill_loss += policy_distill_loss.item() * len(chunk_obs)
-                                else:
-                                    loss = 0.5 * aux_value_loss
+                                policy_distill_loss = torch.stack(policy_distill_losses).mean()
+                                loss = 0.5 * aux_value_loss + 1.0 * policy_distill_loss
+                                
+                                total_policy_distill_loss += policy_distill_loss.item() * len(chunk_transitions)
                             else:
-                                # Just value loss in first sleep cycle
+                                # Just value loss on first cycle
                                 loss = 0.5 * aux_value_loss
                         
-                        # Backward and update
+                        # Backward pass
                         scaler.scale(loss).backward()
+                        
+                        # Apply gradients
                         scaler.unscale_(optimizer)
-                        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+                        torch.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
                         scaler.step(optimizer)
                         scaler.update()
                         
                         # Update stats
-                        total_aux_value_loss += aux_value_loss.item() * len(chunk_obs)
-                        total_processed += len(chunk_obs)
+                        total_aux_value_loss += aux_value_loss.item() * len(chunk_transitions)
+                        total_transitions += len(chunk_transitions)
                         
-                        # Clear CUDA cache
-                        th.cuda.empty_cache()
+                        # Clear memory
+                        torch.cuda.empty_cache()
                 
-                # Report sleep cycle stats
-                if total_processed > 0:
-                    avg_aux_value_loss = total_aux_value_loss / total_processed
-                    avg_policy_distill_loss = total_policy_distill_loss / max(1, total_processed)
+                # Report stats
+                if total_transitions > 0:
+                    avg_aux_value_loss = total_aux_value_loss / total_transitions
+                    avg_policy_distill_loss = total_policy_distill_loss / max(1, total_transitions)
                     print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2 - "
                         f"AuxValueLoss={avg_aux_value_loss:.4f}, "
                         f"PolicyDistillLoss={avg_policy_distill_loss:.4f}, "
-                        f"Transitions={total_processed}")
+                        f"Transitions={total_transitions}")
             
-            # Clear all auxiliary data
-            aux_data.clear()
+            # Clean up
+            original_dists_by_rollout.clear()
             
             # End auxiliary phase
             phase_coordinator.end_auxiliary_phase()
@@ -652,12 +613,12 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 for rollout in buffered_rollouts:
                     rollout_queue.put(rollout)
             
-            # Reset counters
+            # Reset tracking variables
             pi_update_counter = 0
             stored_rollouts = []
             
             # Final cleanup
-            th.cuda.empty_cache()
+            torch.cuda.empty_cache()
             
         else:
             # ===== POLICY PHASE =====
