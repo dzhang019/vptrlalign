@@ -264,8 +264,8 @@ class MinecraftAgentPolicy(nn.Module):
         # Primary value head (for policy optimization)
         self.value_head = self.make_value_head(self.net.output_latent_size())
         
-        # Auxiliary value head (for PPG sleep phase)
-        self.auxiliary_value_head = self.make_value_head(self.net.output_latent_size())
+        # Auxiliary value head (renamed to match weights file)
+        self.aux_value_head = self.make_value_head(self.net.output_latent_size())
         
         self.pi_head = self.make_action_head(self.net.output_latent_size(), **pi_head_kwargs)
 
@@ -283,7 +283,7 @@ class MinecraftAgentPolicy(nn.Module):
         self.net.reset_parameters()
         self.pi_head.reset_parameters()
         self.value_head.reset_parameters()
-        self.auxiliary_value_head.reset_parameters()
+        self.aux_value_head.reset_parameters()
 
     def forward(self, obs, first: th.Tensor, state_in):
         if isinstance(obs, dict):
@@ -301,7 +301,7 @@ class MinecraftAgentPolicy(nn.Module):
 
         pi_logits = self.pi_head(pi_h, mask=mask)
         vpred = self.value_head(v_h)
-        aux_vpred = self.auxiliary_value_head(v_h)  # Prediction from auxiliary value head
+        aux_vpred = self.aux_value_head(v_h)  # Prediction from auxiliary value head
 
         return (pi_logits, vpred, aux_vpred), state_out
 
@@ -340,7 +340,7 @@ class MinecraftAgentPolicy(nn.Module):
 
         (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
 
-        return pd, self.value_head.denormalize(vpred)[:, 0], self.auxiliary_value_head.denormalize(aux_vpred)[:, 0], state_out
+        return pd, self.value_head.denormalize(vpred)[:, 0], self.aux_value_head.denormalize(aux_vpred)[:, 0], state_out
     
     @th.no_grad()
     def act(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
@@ -361,7 +361,7 @@ class MinecraftAgentPolicy(nn.Module):
         result = {
             "log_prob": log_prob[:, 0], 
             "vpred": self.value_head.denormalize(vpred)[:, 0],
-            "aux_vpred": self.auxiliary_value_head.denormalize(aux_vpred)[:, 0]
+            "aux_vpred": self.aux_value_head.denormalize(aux_vpred)[:, 0]
         }
         if return_pd:
             result["pd"] = tree_map(lambda x: x[:, 0], pd)
@@ -399,7 +399,7 @@ class MinecraftAgentPolicy(nn.Module):
         vpred_1d = vpred_2d[:, 0].clone()
         
         # 6) Auxiliary Value
-        aux_vpred_2d = self.auxiliary_value_head.denormalize(aux_vpred)  # shape [B, T=1]
+        aux_vpred_2d = self.aux_value_head.denormalize(aux_vpred)  # shape [B, T=1]
         aux_vpred_1d = aux_vpred_2d[:, 0].clone()
 
         # 7) Optionally return the distribution
@@ -458,12 +458,12 @@ class MinecraftAgentPolicy(nn.Module):
 
         # Denormalize and remove batch dimension
         vpred_seq = self.value_head.denormalize(vpred_seq)[0]  # [T]
-        aux_vpred_seq = self.auxiliary_value_head.denormalize(aux_vpred_seq)[0]  # [T]
+        aux_vpred_seq = self.aux_value_head.denormalize(aux_vpred_seq)[0]  # [T]
         
         # Remove batch dimension from policy distribution
         pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)     # [T, ...]
 
-        return pd_seq, vpred_seq, aux_vpred_seq, log_prob_seq, state_out
+        return pd_seq, vpred_seq, log_prob_seq, state_out
 
     @th.no_grad()
     def v(self, obs, first, state_in):
