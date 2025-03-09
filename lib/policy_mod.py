@@ -264,7 +264,7 @@ class MinecraftAgentPolicy(nn.Module):
         # Primary value head (for policy optimization)
         self.value_head = self.make_value_head(self.net.output_latent_size())
         
-        # Auxiliary value head (renamed to match weights file)
+        # Auxiliary value head (for PPG auxiliary phase)
         self.aux_value_head = self.make_value_head(self.net.output_latent_size())
         
         self.pi_head = self.make_action_head(self.net.output_latent_size(), **pi_head_kwargs)
@@ -286,6 +286,7 @@ class MinecraftAgentPolicy(nn.Module):
         self.aux_value_head.reset_parameters()
 
     def forward(self, obs, first: th.Tensor, state_in):
+        """Forward pass through the network, producing policy logits and value predictions"""
         if isinstance(obs, dict):
             # We don't want to mutate the obs input.
             obs = obs.copy()
@@ -297,11 +298,13 @@ class MinecraftAgentPolicy(nn.Module):
         else:
             mask = None
 
+        # Forward pass through the shared network
         (pi_h, v_h), state_out = self.net(obs, state_in, context={"first": first})
 
+        # Get policy logits and value predictions
         pi_logits = self.pi_head(pi_h, mask=mask)
         vpred = self.value_head(v_h)
-        aux_vpred = self.aux_value_head(v_h)  # Prediction from auxiliary value head
+        aux_vpred = self.aux_value_head(v_h)  # Auxiliary value prediction
 
         return (pi_logits, vpred, aux_vpred), state_out
 
@@ -321,9 +324,35 @@ class MinecraftAgentPolicy(nn.Module):
         """
         return self.pi_head.kl_divergence(pd1, pd2)
 
+    def get_output_for_observation(self, obs, state_in, first):
+        """
+        Return gradient-enabled outputs for given observation.
+
+        Use `get_logprob_of_action` to get log probability of action
+        with the given probability distribution.
+
+        Returns:
+          - probability distribution given observation
+          - value prediction for given observation
+          - auxiliary value prediction for given observation
+          - new state
+        """
+        # We need to add a fictitious time dimension everywhere
+        obs = tree_map(lambda x: x.unsqueeze(1), obs)
+        first = first.unsqueeze(1)
+
+        (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
+
+        return (
+            pd,
+            self.value_head.denormalize(vpred)[:, 0],
+            self.aux_value_head.denormalize(aux_vpred)[:, 0],
+            state_out
+        )
     
     @th.no_grad()
     def act(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
+        """Inference mode action selection"""
         # We need to add a fictitious time dimension everywhere
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
@@ -354,107 +383,98 @@ class MinecraftAgentPolicy(nn.Module):
         Single-step forward pass for a recurrent policy in 'train' mode.
         If 'taken_action' is None, we sample an action from the distribution.
         Otherwise, we compute log-prob of that forced 'taken_action'.
+        
+        Returns action, state, and a dict with log_prob, vpred, aux_vpred, and optionally pd.
         """
-
-        # 1) Add a fictitious time dimension
+        # Add fictitious time dimension
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        # 2) Forward pass
+        # Forward pass
         (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
 
-        # 3) Choose action: either sample or use forced `taken_action`
+        # Choose action (sample or forced)
         if taken_action is None:
             ac = self.pi_head.sample(pd, deterministic=not stochastic)
         else:
             ac = tree_map(lambda x: x.unsqueeze(1), taken_action)
 
-        # 4) log_prob
-        log_prob_2d = self.pi_head.logprob(ac, pd)          # shape [B, T=1]
-        # We slice out dimension 1, but must .clone() to avoid in-place modifications
+        # Calculate log probability
+        log_prob_2d = self.pi_head.logprob(ac, pd)
         log_prob_1d = log_prob_2d[:, 0].clone()
 
-        # 5) Value
-        vpred_2d = self.value_head.denormalize(vpred)       # shape [B, T=1]
-        vpred_1d = vpred_2d[:, 0].clone()
-        
-        # 6) Auxiliary Value
-        aux_vpred_2d = self.aux_value_head.denormalize(aux_vpred)  # shape [B, T=1]
-        aux_vpred_1d = aux_vpred_2d[:, 0].clone()
+        # Denormalize value predictions
+        vpred_1d = self.value_head.denormalize(vpred)[:, 0].clone()
+        aux_vpred_1d = self.aux_value_head.denormalize(aux_vpred)[:, 0].clone()
 
-        # 7) Optionally return the distribution
+        # Prepare result
         result = {
-            "log_prob": log_prob_1d, 
+            "log_prob": log_prob_1d,
             "vpred": vpred_1d,
             "aux_vpred": aux_vpred_1d
         }
+        
+        # Optionally include policy distribution
         if return_pd:
-            # We also .clone() each slice from `pd`
             result["pd"] = tree_map(lambda x: x[:, 0].clone(), pd)
 
-        # 8) Squeeze out the time dimension for the final action
+        # Remove time dimension from action
         ac = tree_map(lambda x: x[:, 0], ac)
 
         return ac, state_out, result
 
     def act_train_sequence(self, obs_sequence, hidden_state, forced_actions=None, stochastic=True):
         """
-        Process a whole sequence of observations at once
+        Process a whole sequence of observations at once.
+        Returns policy distributions, value predictions, auxiliary value predictions,
+        log probabilities, and final hidden state.
         """
-        # Assume obs_sequence is already in the right format (e.g., {"img": [T, C, H, W]})
-        T = obs_sequence["img"].shape[0]
+        # Get batch size from observation
+        batch_size = 1  # Single sequence case
         
-        # Create first_mask: only the first timestep is "first"
-        first_mask = th.zeros(T, dtype=th.bool, device=obs_sequence["img"].device)
+        # Get sequence length
+        seq_len = obs_sequence["img"].shape[0]  # [T, C, H, W]
+        
+        # Create first mask (only first timestep is "first")
+        first_mask = th.zeros(seq_len, dtype=th.bool, device=obs_sequence["img"].device)
         first_mask[0] = True
         first_mask = first_mask.unsqueeze(0)  # [1, T]
         
         # Add batch dimension to observations
         batched_obs = {"img": obs_sequence["img"].unsqueeze(0)}  # [1, T, C, H, W]
-
+        
         # Forward pass through policy
         (pd_seq, vpred_seq, aux_vpred_seq), state_out = self(
             obs=batched_obs,
             first=first_mask,
             state_in=hidden_state
         )
-
-        # Handle log probabilities
+        
+        # Calculate log probabilities if forced actions provided
         log_prob_seq = None
         if forced_actions is not None:
-            # Stack forced actions to [1, T, ...] 
-            buttons = th.stack([fa["buttons"] for fa in forced_actions], dim=1)  # [1, T, ...]
-            camera = th.stack([fa["camera"] for fa in forced_actions], dim=1)    # [1, T, ...]
-            ac_seq = {"buttons": buttons, "camera": camera}
+            # Stack forced actions to [B, T, ...] format
+            stacked_actions = {}
+            for key in forced_actions[0]:
+                stacked_actions[key] = th.stack([fa[key] for fa in forced_actions], dim=1)  # [B, T, ...]
             
-            # Compute log probabilities for the forced actions
-            log_prob_2d = self.pi_head.logprob(ac_seq, pd_seq)  # [1, T]
-            log_prob_seq = log_prob_2d[0]  # [T]
+            # Calculate log probabilities
+            log_prob_batch = self.pi_head.logprob(stacked_actions, pd_seq)  # [B, T]
+            log_prob_seq = log_prob_batch[0]  # [T]
         else:
-            # Sample actions
-            ac_seq = self.pi_head.sample(pd_seq, deterministic=not stochastic)  # [1, T, ...]
-            log_prob_2d = self.pi_head.logprob(ac_seq, pd_seq)  # [1, T]
-            log_prob_seq = log_prob_2d[0]  # [T]
-
-        # Denormalize and remove batch dimension
+            # Sample actions if no forced actions
+            ac_seq = self.pi_head.sample(pd_seq, deterministic=not stochastic)  # [B, T, ...]
+            log_prob_batch = self.pi_head.logprob(ac_seq, pd_seq)  # [B, T]
+            log_prob_seq = log_prob_batch[0]  # [T]
+        
+        # Denormalize and remove batch dimension for value predictions
         vpred_seq = self.value_head.denormalize(vpred_seq)[0]  # [T]
         aux_vpred_seq = self.aux_value_head.denormalize(aux_vpred_seq)[0]  # [T]
         
         # Remove batch dimension from policy distribution
-        pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)     # [T, ...]
-
+        pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)  # [T, ...]
+        
         return pd_seq, vpred_seq, aux_vpred_seq, log_prob_seq, state_out
-
-    @th.no_grad()
-    def v(self, obs, first, state_in):
-        """Predict value for a given mdp observation"""
-        obs = tree_map(lambda x: x.unsqueeze(1), obs)
-        first = first.unsqueeze(1)
-
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
-
-        # After unsqueezing, squeeze back
-        return self.value_head.denormalize(vpred)[:, 0]
 
 
 class InverseActionNet(MinecraftPolicy):
