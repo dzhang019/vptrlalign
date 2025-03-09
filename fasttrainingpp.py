@@ -449,7 +449,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             # Signal start of auxiliary phase
             phase_coordinator.start_auxiliary_phase()
             print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
-            
+            aux_data = {}
             # Use only a limited number of most recent rollouts
             max_rollouts = 10  # Process far fewer rollouts to save memory
             recent_rollouts = []
