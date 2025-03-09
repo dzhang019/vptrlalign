@@ -442,7 +442,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     )
     
     # Get sequence data from the pretrained policy (for KL divergence)
-    old_pi_dist_seq, old_vpred_seq, _, _, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
+    old_pi_dist_seq, old_vpred_seq, _, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
         stochastic=False,
