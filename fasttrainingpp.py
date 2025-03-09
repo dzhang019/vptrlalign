@@ -150,7 +150,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 if obs_list[env_id] is not None:
                     # Generate action using agent
                     with th.no_grad():
-                        minerl_action, _, _, _, new_hid = agent.get_action_and_training_info(
+                        minerl_action, _, _, _, _, new_hid = agent.get_action_and_training_info(
                             minerl_obs=obs_list[env_id],
                             hidden_state=hidden_states[env_id],
                             stochastic=True,
@@ -218,138 +218,212 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         rollout_queue.put(rollouts)
 
 # Modified training thread to maintain sequence integrity in both forward and backward passes
-def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
-    # Hyperparameters
-    LEARNING_RATE = 2e-5
-    MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 10.0
-    GAMMA = 0.9999
-    LAM = 0.95
-    VALUE_LOSS_COEF = 0.5
-    KL_DECAY = 0.9995
+# def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
+#     # Hyperparameters
+#     LEARNING_RATE = 2e-5
+#     MAX_GRAD_NORM = 1.0
+#     LAMBDA_KL = 10.0
+#     GAMMA = 0.9999
+#     LAM = 0.95
+#     VALUE_LOSS_COEF = 0.5
+#     KL_DECAY = 0.9995
     
-    # Setup optimizer
-    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
-    running_loss = 0.0
-    total_steps = 0
-    iteration = 0
-    scaler = GradScaler()
+#     # Setup optimizer
+#     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
+#     running_loss = 0.0
+#     total_steps = 0
+#     iteration = 0
+#     scaler = GradScaler()
     
-    while iteration < num_iterations and not stop_flag[0]:
-        iteration += 1
+#     while iteration < num_iterations and not stop_flag[0]:
+#         iteration += 1
         
-        print(f"[Training Thread] Waiting for rollouts...")
-        wait_start = time.time()
-        rollouts = rollout_queue.get()
-        wait_duration = time.time() - wait_start
-        print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+#         print(f"[Training Thread] Waiting for rollouts...")
+#         wait_start = time.time()
+#         rollouts = rollout_queue.get()
+#         wait_duration = time.time() - wait_start
+#         print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
         
-        train_start = time.time()
-        print(f"[Training Thread] Processing rollouts for iteration {iteration}")
+#         train_start = time.time()
+#         print(f"[Training Thread] Processing rollouts for iteration {iteration}")
         
-        # Reset optimizer gradients once before processing all environments
-        optimizer.zero_grad()
+#         # Reset optimizer gradients once before processing all environments
+#         optimizer.zero_grad()
         
-        # Track statistics for reporting
-        total_loss_val = 0
-        total_policy_loss = 0
-        total_value_loss = 0
-        total_kl_loss = 0
-        valid_envs = 0
-        total_transitions = 0
+#         # Track statistics for reporting
+#         total_loss_val = 0
+#         total_policy_loss = 0
+#         total_value_loss = 0
+#         total_kl_loss = 0
+#         valid_envs = 0
+#         total_transitions = 0
         
-        # Process each environment separately
-        for env_i, env_rollout in enumerate(rollouts):
-            # Skip empty rollouts
-            if len(env_rollout["obs"]) == 0:
-                print(f"[Training Thread] Environment {env_i} has no transitions, skipping")
-                continue
+#         # Process each environment separately
+#         for env_i, env_rollout in enumerate(rollouts):
+#             # Skip empty rollouts
+#             if len(env_rollout["obs"]) == 0:
+#                 print(f"[Training Thread] Environment {env_i} has no transitions, skipping")
+#                 continue
                 
-            # Process this environment's rollout
-            env_transitions = train_unroll(
-                agent,
-                pretrained_policy,
-                env_rollout,
-                gamma=GAMMA,
-                lam=LAM
-            )
+#             # Process this environment's rollout
+#             env_transitions = train_unroll(
+#                 agent,
+#                 pretrained_policy,
+#                 env_rollout,
+#                 gamma=GAMMA,
+#                 lam=LAM
+#             )
             
-            if len(env_transitions) == 0:
-                continue
+#             if len(env_transitions) == 0:
+#                 continue
             
-            # Process this environment's transitions
-            env_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in env_transitions])
-            env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
-            env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
-            env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
+#             # Process this environment's transitions
+#             env_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in env_transitions])
+#             env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
+#             env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
+#             env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
             
-            # Normalize advantages for this environment
-            env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
+#             # Normalize advantages for this environment
+#             env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
             
-            # Compute losses for this environment
-            with autocast():
-                # Policy loss (Actor)
-                policy_loss = -(env_advantages * env_log_probs).mean()
+#             # Compute losses for this environment
+#             with autocast():
+#                 # Policy loss (Actor)
+#                 policy_loss = -(env_advantages * env_log_probs).mean()
                 
-                # Value function loss (Critic)
-                value_loss = ((env_v_preds - env_returns) ** 2).mean()
+#                 # Value function loss (Critic)
+#                 value_loss = ((env_v_preds - env_returns) ** 2).mean()
                 
-                # KL divergence loss
-                kl_losses = []
-                for t in env_transitions:
-                    kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
-                    kl_losses.append(kl_loss)
-                kl_loss = th.stack(kl_losses).mean()
+#                 # KL divergence loss
+#                 kl_losses = []
+#                 for t in env_transitions:
+#                     kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+#                     kl_losses.append(kl_loss)
+#                 kl_loss = th.stack(kl_losses).mean()
                 
-                # Total loss for this environment
-                env_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+#                 # Total loss for this environment
+#                 env_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
             
-            # Separate backward pass for each environment to maintain sequence integrity
-            scaler.scale(env_loss).backward()
+#             # Separate backward pass for each environment to maintain sequence integrity
+#             scaler.scale(env_loss).backward()
             
-            # Accumulate statistics for reporting
-            total_loss_val += env_loss.item()
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            total_kl_loss += kl_loss.item()
-            valid_envs += 1
-            total_transitions += len(env_transitions)
+#             # Accumulate statistics for reporting
+#             total_loss_val += env_loss.item()
+#             total_policy_loss += policy_loss.item()
+#             total_value_loss += value_loss.item()
+#             total_kl_loss += kl_loss.item()
+#             valid_envs += 1
+#             total_transitions += len(env_transitions)
         
-        # Skip update if no valid transitions found
-        if valid_envs == 0:
-            print(f"[Training Thread] No valid transitions collected, skipping update.")
-            continue
+#         # Skip update if no valid transitions found
+#         if valid_envs == 0:
+#             print(f"[Training Thread] No valid transitions collected, skipping update.")
+#             continue
         
-        # Average losses for reporting
-        avg_policy_loss = total_policy_loss / valid_envs
-        avg_value_loss = total_value_loss / valid_envs
-        avg_kl_loss = total_kl_loss / valid_envs
+#         # Average losses for reporting
+#         avg_policy_loss = total_policy_loss / valid_envs
+#         avg_value_loss = total_value_loss / valid_envs
+#         avg_kl_loss = total_kl_loss / valid_envs
         
-        # Apply gradients that were already accumulated from each environment's backward pass
-        scaler.unscale_(optimizer)
-        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
-        scaler.step(optimizer)
-        scaler.update()
+#         # Apply gradients that were already accumulated from each environment's backward pass
+#         scaler.unscale_(optimizer)
+#         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+#         scaler.step(optimizer)
+#         scaler.update()
         
-        train_duration = time.time() - train_start
+#         train_duration = time.time() - train_start
         
-        print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
-              f"to process and train on {total_transitions} transitions from {valid_envs} environments.")
+#         print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
+#               f"to process and train on {total_transitions} transitions from {valid_envs} environments.")
         
-        # Update stats
-        running_loss += total_loss_val
-        total_steps += total_transitions
-        avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
-        LAMBDA_KL *= KL_DECAY
+#         # Update stats
+#         running_loss += total_loss_val
+#         total_steps += total_transitions
+#         avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
+#         LAMBDA_KL *= KL_DECAY
         
-        print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
-              f"Loss={total_loss_val:.4f}, PolicyLoss={avg_policy_loss:.4f}, "
-              f"ValueLoss={avg_value_loss:.4f}, KLLoss={avg_kl_loss:.4f}, "
-              f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
+#         print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
+#               f"Loss={total_loss_val:.4f}, PolicyLoss={avg_policy_loss:.4f}, "
+#               f"ValueLoss={avg_value_loss:.4f}, KLLoss={avg_kl_loss:.4f}, "
+#               f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
 
 
-# Keep train_unroll function exactly the same as the original
+# # Keep train_unroll function exactly the same as the original
+# def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
+#     transitions = []
+#     T = len(rollout["obs"])
+#     if T == 0:
+#         return transitions
+    
+#     obs_seq = rollout["obs"]
+#     act_seq = rollout["actions"]
+#     hidden_states_seq = rollout["hidden_states"]
+
+#     pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
+#         minerl_obs_list=obs_seq,
+#         initial_hidden_state=hidden_states_seq[0],
+#         stochastic=False,
+#         taken_actions_list=act_seq
+#     )
+    
+#     old_pi_dist_seq, old_vpred_seq, aux_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
+#         minerl_obs_list=obs_seq,
+#         initial_hidden_state=pretrained_policy.policy.initial_state(1),
+#         stochastic=False,
+#         taken_actions_list=act_seq
+#     )
+
+#     for t in range(T):
+#         # Create a timestep-specific policy distribution dictionary
+#         cur_pd_t = {k: v[t] for k, v in pi_dist_seq.items()}
+#         old_pd_t = {k: v[t] for k, v in old_pi_dist_seq.items()}
+        
+#         transitions.append({
+#             "obs": rollout["obs"][t],
+#             "action": rollout["actions"][t],
+#             "reward": rollout["rewards"][t],
+#             "done": rollout["dones"][t],
+#             "v_pred": vpred_seq[t],
+#             "aux_v_pred": aux_vpred_seq[t],
+#             "log_prob": log_prob_seq[t],
+#             "cur_pd": cur_pd_t,
+#             "old_pd": old_pd_t,
+#             "next_obs": rollout["next_obs"][t]
+#         })
+
+#     # Bootstrap value calculation
+#     bootstrap_value = 0.0
+#     if not transitions[-1]["done"]:
+#         with th.no_grad():
+#             hid_t_cpu = rollout["hidden_states"][-1]
+#             hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
+            
+#             _, _, v_next, _, _, _ = agent.get_action_and_training_info(
+#                 minerl_obs=transitions[-1]["next_obs"],
+#                 hidden_state=hid_t,
+#                 stochastic=False,
+#                 taken_action=None
+#             )
+#             bootstrap_value = v_next.item()
+    
+#     # GAE calculation
+#     gae = 0.0
+#     for i in reversed(range(T)):
+#         r_i = transitions[i]["reward"]
+#         v_i = transitions[i]["v_pred"].item()
+#         done_i = transitions[i]["done"]
+#         mask = 1.0 - float(done_i)
+#         next_val = bootstrap_value if i == T - 1 else transitions[i+1]["v_pred"].item()
+#         delta = r_i + gamma * next_val * mask - v_i
+#         gae = delta + gamma * lam * mask * gae
+#         transitions[i]["advantage"] = gae
+#         transitions[i]["return"] = v_i + gae
+
+#     return transitions
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
+    """
+    Process a rollout into transitions with auxiliary value predictions
+    """
     transitions = []
     T = len(rollout["obs"])
     if T == 0:
@@ -359,6 +433,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]
     hidden_states_seq = rollout["hidden_states"]
 
+    # Get sequence data from the current agent policy (now including auxiliary value predictions)
     pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=hidden_states_seq[0],
@@ -366,7 +441,8 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         taken_actions_list=act_seq
     )
     
-    old_pi_dist_seq, old_vpred_seq, aux_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
+    # Get sequence data from the pretrained policy (for KL divergence)
+    old_pi_dist_seq, old_vpred_seq, _, _, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
         stochastic=False,
@@ -374,7 +450,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     )
 
     for t in range(T):
-        # Create a timestep-specific policy distribution dictionary
+        # Create timestep-specific policy distribution dictionaries
         cur_pd_t = {k: v[t] for k, v in pi_dist_seq.items()}
         old_pd_t = {k: v[t] for k, v in old_pi_dist_seq.items()}
         
@@ -384,7 +460,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             "reward": rollout["rewards"][t],
             "done": rollout["dones"][t],
             "v_pred": vpred_seq[t],
-            "aux_v_pred": aux_vpred_seq[t],
+            "aux_v_pred": aux_vpred_seq[t],  # Store auxiliary value prediction
             "log_prob": log_prob_seq[t],
             "cur_pd": cur_pd_t,
             "old_pd": old_pd_t,
@@ -398,6 +474,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             hid_t_cpu = rollout["hidden_states"][-1]
             hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
             
+            # Get value prediction for next observation (use standard value head, not auxiliary)
             _, _, v_next, _, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 hidden_state=hid_t,
@@ -417,9 +494,279 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         delta = r_i + gamma * next_val * mask - v_i
         gae = delta + gamma * lam * mask * gae
         transitions[i]["advantage"] = gae
-        transitions[i]["return"] = v_i + gae
+        transitions[i]["return"] = gae + v_i  # store return for both value heads
 
     return transitions
+
+
+def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
+    """
+    Modified training thread that implements PPG with auxiliary value head
+    """
+    # Hyperparameters
+    LEARNING_RATE = 2e-5
+    MAX_GRAD_NORM = 1.0
+    LAMBDA_KL = 0.2  # Initial KL coefficient
+    GAMMA = 0.9999
+    LAM = 0.95
+    VALUE_LOSS_COEF = 0.5
+    AUX_VALUE_LOSS_COEF = 0.5
+    KL_DECAY = 0.9995
+    
+    # PPG specific hyperparameters
+    PPG_N_PI_EPOCHS = 1       # Number of policy epochs per iteration
+    PPG_N_VALUE_EPOCHS = 1    # Number of value function epochs per iteration
+    PPG_N_AUX_EPOCHS = 6      # Number of auxiliary phases optimization epochs
+    PPG_N_ITERATIONS = 32     # Main algorithm iterations before auxiliary phase
+    
+    # Setup optimizer
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
+    running_loss = 0.0
+    total_steps = 0
+    iteration = 0
+    scaler = GradScaler()
+    
+    # Buffer to store transitions for auxiliary phase
+    buffer = []
+    main_phase_count = 0
+    
+    while iteration < num_iterations and not stop_flag[0]:
+        iteration += 1
+        
+        # Determine if we're in the auxiliary phase
+        is_aux_phase = (main_phase_count >= PPG_N_ITERATIONS) and len(buffer) > 0
+        
+        if is_aux_phase:
+            # ====== AUXILIARY PHASE ======
+            print(f"[Training Thread] Starting PPG auxiliary phase at iteration {iteration}")
+            
+            # Use accumulated buffer for auxiliary optimization
+            train_start = time.time()
+            
+            # Multiple epochs of auxiliary optimization
+            for aux_epoch in range(PPG_N_AUX_EPOCHS):
+                # Reset optimizer gradients
+                optimizer.zero_grad()
+                
+                # Track statistics
+                total_aux_value_loss = 0
+                total_kl_loss = 0
+                valid_batches = 0
+                total_transitions = 0
+                
+                # Process each batch of transitions in the buffer
+                for batch_i, env_transitions in enumerate(buffer):
+                    if len(env_transitions) == 0:
+                        continue
+                    
+                    # Extract returns for value training
+                    env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
+                    
+                    # Forward pass through policy with auxiliary value head
+                    with autocast():
+                        aux_value_losses = []
+                        kl_losses = []
+                        
+                        # Process each transition
+                        for t in env_transitions:
+                            # Get auxiliary value prediction for this observation
+                            obs = t["obs"]
+                            if isinstance(obs, dict):
+                                obs = {k: th.tensor(v).unsqueeze(0).to("cuda") if isinstance(v, np.ndarray) else v.unsqueeze(0).to("cuda") 
+                                      for k, v in obs.items()}
+                            else:
+                                obs = th.tensor(obs).unsqueeze(0).to("cuda")
+                            
+                            # Create first tensor (all False for recurrent processing)
+                            first = th.zeros(1, dtype=th.bool, device="cuda")
+                            
+                            # Get hidden state (use fresh state for simplicity)
+                            hid_state = agent.policy.initial_state(1)
+                            
+                            # Forward pass through policy to get current policy distribution and auxiliary value
+                            pd, _, aux_vpred, _ = agent.policy.get_output_for_observation(
+                                obs=obs,
+                                state_in=hid_state,
+                                first=first
+                            )
+                            
+                            # Auxiliary value loss (MSE between auxiliary value prediction and return)
+                            target_return = th.tensor([t["return"]], device="cuda")
+                            aux_value_loss = F.mse_loss(aux_vpred, target_return)
+                            aux_value_losses.append(aux_value_loss)
+                            
+                            # KL divergence loss between current and old policy
+                            kl_loss = compute_kl_loss(pd, t["old_pd"])
+                            kl_losses.append(kl_loss)
+                        
+                        # Aggregate losses for this batch
+                        aux_value_loss = th.stack(aux_value_losses).mean()
+                        kl_loss = th.stack(kl_losses).mean()
+                        
+                        # Total auxiliary phase loss
+                        batch_loss = AUX_VALUE_LOSS_COEF * aux_value_loss + LAMBDA_KL * kl_loss
+                    
+                    # Backward pass for this batch
+                    scaler.scale(batch_loss).backward()
+                    
+                    # Statistics
+                    total_aux_value_loss += aux_value_loss.item()
+                    total_kl_loss += kl_loss.item()
+                    valid_batches += 1
+                    total_transitions += len(env_transitions)
+                
+                # Skip update if no valid batches
+                if valid_batches == 0:
+                    print(f"[Training Thread] No valid batches for auxiliary phase, skipping update.")
+                    continue
+                
+                # Apply gradients
+                scaler.unscale_(optimizer)
+                th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+                scaler.step(optimizer)
+                scaler.update()
+                
+                # Report auxiliary phase statistics
+                avg_aux_value_loss = total_aux_value_loss / valid_batches
+                avg_kl_loss = total_kl_loss / valid_batches
+                
+                print(f"[Training Thread] Auxiliary Phase Epoch {aux_epoch+1}/{PPG_N_AUX_EPOCHS}, "
+                      f"AuxValueLoss={avg_aux_value_loss:.4f}, KLLoss={avg_kl_loss:.4f}, "
+                      f"ProcessedTransitions={total_transitions}")
+            
+            # End of auxiliary phase
+            aux_duration = time.time() - train_start
+            print(f"[Training Thread] Completed auxiliary phase in {aux_duration:.3f}s")
+            
+            # Reset main phase counter and clear buffer after auxiliary phase
+            main_phase_count = 0
+            buffer = []
+            
+            # Update KL coefficient
+            LAMBDA_KL *= KL_DECAY
+            
+        else:
+            # ====== MAIN PHASE ======
+            print(f"[Training Thread] Main Phase {main_phase_count+1}/{PPG_N_ITERATIONS} - Waiting for rollouts...")
+            wait_start = time.time()
+            rollouts = rollout_queue.get()
+            wait_duration = time.time() - wait_start
+            print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+            
+            train_start = time.time()
+            print(f"[Training Thread] Processing rollouts for iteration {iteration}")
+            
+            # Reset optimizer gradients once before processing all environments
+            optimizer.zero_grad()
+            
+            # Track statistics for reporting
+            total_loss_val = 0
+            total_policy_loss = 0
+            total_value_loss = 0
+            total_kl_loss = 0
+            valid_envs = 0
+            total_transitions = 0
+            
+            # Current batch transitions for buffer
+            current_batch_transitions = []
+            
+            # Process each environment separately
+            for env_i, env_rollout in enumerate(rollouts):
+                # Skip empty rollouts
+                if len(env_rollout["obs"]) == 0:
+                    print(f"[Training Thread] Environment {env_i} has no transitions, skipping")
+                    continue
+                    
+                # Process this environment's rollout
+                env_transitions = train_unroll(
+                    agent,
+                    pretrained_policy,
+                    env_rollout,
+                    gamma=GAMMA,
+                    lam=LAM
+                )
+                
+                # Store transitions for auxiliary phase
+                if len(env_transitions) > 0:
+                    current_batch_transitions.append(env_transitions)
+                
+                if len(env_transitions) == 0:
+                    continue
+                
+                # Process this environment's transitions for main phase
+                env_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in env_transitions])
+                env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
+                env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
+                env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
+                
+                # Normalize advantages for this environment
+                env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
+                
+                # Compute losses for this environment
+                with autocast():
+                    # Policy loss (Actor)
+                    policy_loss = -(env_advantages * env_log_probs).mean()
+                    
+                    # Value function loss (Critic)
+                    value_loss = ((env_v_preds - env_returns) ** 2).mean()
+                    
+                    # KL divergence loss
+                    kl_losses = []
+                    for t in env_transitions:
+                        kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                        kl_losses.append(kl_loss)
+                    kl_loss = th.stack(kl_losses).mean()
+                    
+                    # Total loss for this environment
+                    env_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+                
+                # Separate backward pass for each environment to maintain sequence integrity
+                scaler.scale(env_loss).backward()
+                
+                # Accumulate statistics for reporting
+                total_loss_val += env_loss.item()
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                total_kl_loss += kl_loss.item()
+                valid_envs += 1
+                total_transitions += len(env_transitions)
+            
+            # Skip update if no valid transitions found
+            if valid_envs == 0:
+                print(f"[Training Thread] No valid transitions collected, skipping update.")
+                continue
+            
+            # Update the buffer with newest data
+            buffer.extend(current_batch_transitions)
+            
+            # Increment main phase counter
+            main_phase_count += 1
+            
+            # Average losses for reporting
+            avg_policy_loss = total_policy_loss / valid_envs
+            avg_value_loss = total_value_loss / valid_envs
+            avg_kl_loss = total_kl_loss / valid_envs
+            
+            # Apply gradients that were already accumulated from each environment's backward pass
+            scaler.unscale_(optimizer)
+            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+            scaler.step(optimizer)
+            scaler.update()
+            
+            train_duration = time.time() - train_start
+            
+            print(f"[Training Thread] Main Phase {main_phase_count}/{PPG_N_ITERATIONS} took {train_duration:.3f}s "
+                  f"to process and train on {total_transitions} transitions from {valid_envs} environments.")
+            
+            # Update stats
+            running_loss += total_loss_val
+            total_steps += total_transitions
+            avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
+            
+            print(f"[Training Thread] Main Phase {main_phase_count}/{PPG_N_ITERATIONS} "
+                  f"Loss={total_loss_val:.4f}, PolicyLoss={avg_policy_loss:.4f}, "
+                  f"ValueLoss={avg_value_loss:.4f}, KLLoss={avg_kl_loss:.4f}, "
+                  f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
 
 
 def train_rl_mp(
