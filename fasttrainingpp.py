@@ -150,7 +150,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 if obs_list[env_id] is not None:
                     # Generate action using agent
                     with th.no_grad():
-                        minerl_action, _, _, _, _, new_hid = agent.get_action_and_training_info(
+                        # Note: We need to handle the auxiliary value head in the return values
+                        # but we don't need to use it for environment stepping
+                        minerl_action, pi_dist, vpred, _, log_prob, new_hid = agent.get_action_and_training_info(
                             minerl_obs=obs_list[env_id],
                             hidden_state=hidden_states[env_id],
                             stochastic=True,
@@ -421,9 +423,6 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
 
 #     return transitions
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
-    """
-    Process a rollout into transitions with auxiliary value predictions
-    """
     transitions = []
     T = len(rollout["obs"])
     if T == 0:
@@ -433,7 +432,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]
     hidden_states_seq = rollout["hidden_states"]
 
-    # Get sequence data from the current agent policy (now including auxiliary value predictions)
+    # Get sequence data from the current agent policy (now includes auxiliary value head)
     pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=hidden_states_seq[0],
@@ -442,12 +441,19 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     )
     
     # Get sequence data from the pretrained policy (for KL divergence)
-    old_pi_dist_seq, old_vpred_seq, _, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
+    # The pretrained policy might not have auxiliary value head yet, so handle both cases
+    pretrained_outputs = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
         stochastic=False,
         taken_actions_list=act_seq
     )
+    
+    # Handle both 4 and 5 return values format
+    if len(pretrained_outputs) == 5:
+        old_pi_dist_seq, old_vpred_seq, _, old_log_prob_seq, _ = pretrained_outputs
+    else:
+        old_pi_dist_seq, old_vpred_seq, old_log_prob_seq, _ = pretrained_outputs
 
     for t in range(T):
         # Create timestep-specific policy distribution dictionaries
@@ -474,14 +480,19 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             hid_t_cpu = rollout["hidden_states"][-1]
             hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
             
-            # Get value prediction for next observation (use standard value head, not auxiliary)
-            _, _, v_next, _, _, _ = agent.get_action_and_training_info(
+            # Get value prediction for next observation
+            # Note: We now account for the auxiliary value head in the return values
+            outputs = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 hidden_state=hid_t,
                 stochastic=False,
                 taken_action=None
             )
-            bootstrap_value = v_next.item()
+            
+            # Extract vpred (the primary value prediction, not the auxiliary one)
+            # Format is: (minerl_action, pi_dist, vpred, aux_vpred, log_prob, new_hidden_state)
+            vpred_index = 2  # Index of vpred in the returned tuple
+            bootstrap_value = outputs[vpred_index].item()
     
     # GAE calculation
     gae = 0.0
@@ -494,19 +505,16 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         delta = r_i + gamma * next_val * mask - v_i
         gae = delta + gamma * lam * mask * gae
         transitions[i]["advantage"] = gae
-        transitions[i]["return"] = gae + v_i  # store return for both value heads
+        transitions[i]["return"] = gae + v_i  # Store return for both value heads
 
     return transitions
 
 
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
-    """
-    Modified training thread that implements PPG with auxiliary value head
-    """
     # Hyperparameters
     LEARNING_RATE = 2e-5
     MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 0.2  # Initial KL coefficient
+    LAMBDA_KL = 10.0
     GAMMA = 0.9999
     LAM = 0.95
     VALUE_LOSS_COEF = 0.5
@@ -514,10 +522,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     KL_DECAY = 0.9995
     
     # PPG specific hyperparameters
-    PPG_N_PI_EPOCHS = 1       # Number of policy epochs per iteration
-    PPG_N_VALUE_EPOCHS = 1    # Number of value function epochs per iteration
-    PPG_N_AUX_EPOCHS = 6      # Number of auxiliary phases optimization epochs
     PPG_N_ITERATIONS = 32     # Main algorithm iterations before auxiliary phase
+    PPG_N_AUX_EPOCHS = 6      # Number of auxiliary phase optimization epochs
     
     # Setup optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
@@ -563,19 +569,31 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                     env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
                     
                     # Forward pass through policy with auxiliary value head
-                    with autocast():
+                    with th.amp.autocast(device_type='cuda'):
                         aux_value_losses = []
                         kl_losses = []
                         
                         # Process each transition
                         for t in env_transitions:
-                            # Get auxiliary value prediction for this observation
+                            # Get observation (handle different types)
                             obs = t["obs"]
+                            
+                            # Process observation based on type
                             if isinstance(obs, dict):
-                                obs = {k: th.tensor(v).unsqueeze(0).to("cuda") if isinstance(v, np.ndarray) else v.unsqueeze(0).to("cuda") 
-                                      for k, v in obs.items()}
-                            else:
+                                processed_obs = {}
+                                for k, v in obs.items():
+                                    if isinstance(v, np.ndarray):
+                                        processed_obs[k] = th.tensor(v).unsqueeze(0).to("cuda")
+                                    elif isinstance(v, th.Tensor):
+                                        processed_obs[k] = v.unsqueeze(0).to("cuda")
+                                    else:
+                                        # Skip unsqueeze for non-tensor types
+                                        processed_obs[k] = v
+                                obs = processed_obs
+                            elif isinstance(obs, np.ndarray):
                                 obs = th.tensor(obs).unsqueeze(0).to("cuda")
+                            elif isinstance(obs, th.Tensor):
+                                obs = obs.unsqueeze(0).to("cuda")
                             
                             # Create first tensor (all False for recurrent processing)
                             first = th.zeros(1, dtype=th.bool, device="cuda")
@@ -583,7 +601,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                             # Get hidden state (use fresh state for simplicity)
                             hid_state = agent.policy.initial_state(1)
                             
-                            # Forward pass through policy to get current policy distribution and auxiliary value
+                            # Forward pass through policy
                             pd, _, aux_vpred, _ = agent.policy.get_output_for_observation(
                                 obs=obs,
                                 state_in=hid_state,
@@ -642,11 +660,9 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             main_phase_count = 0
             buffer = []
             
-            # Update KL coefficient
-            LAMBDA_KL *= KL_DECAY
-            
         else:
             # ====== MAIN PHASE ======
+            # Regular policy training (similar to your original code)
             print(f"[Training Thread] Main Phase {main_phase_count+1}/{PPG_N_ITERATIONS} - Waiting for rollouts...")
             wait_start = time.time()
             rollouts = rollout_queue.get()
@@ -703,7 +719,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
                 
                 # Compute losses for this environment
-                with autocast():
+                with th.amp.autocast(device_type='cuda'):
                     # Policy loss (Actor)
                     policy_loss = -(env_advantages * env_log_probs).mean()
                     
@@ -762,6 +778,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             running_loss += total_loss_val
             total_steps += total_transitions
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
+            LAMBDA_KL *= KL_DECAY
             
             print(f"[Training Thread] Main Phase {main_phase_count}/{PPG_N_ITERATIONS} "
                   f"Loss={total_loss_val:.4f}, PolicyLoss={avg_policy_loss:.4f}, "
