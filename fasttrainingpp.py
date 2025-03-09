@@ -844,3 +844,166 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             total_steps += num_transitions
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
+def train_rl_mp(
+    in_model,
+    in_weights,
+    out_weights,
+    out_episodes,
+    num_iterations=10,
+    rollout_steps=40,
+    num_envs=2,
+    queue_size=3
+):
+    """
+    Multiprocessing version with separate processes for environment stepping
+    """
+    # Set spawn method for multiprocessing
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        print("Multiprocessing start method already set")
+    
+    # Create dummy environment for agent initialization
+    dummy_env = HumanSurvival(**ENV_KWARGS).make()
+    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
+    
+    # Create agent for main thread
+    agent = MineRLAgent(
+        dummy_env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    agent.load_weights(in_weights)
+    
+    # Create pretrained policy for KL divergence
+    pretrained_policy = MineRLAgent(
+        dummy_env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    pretrained_policy.load_weights(in_weights)
+    
+    # Create phase coordinator
+    phase_coordinator = PhaseCoordinator()
+    
+    # Create multiprocessing shared objects
+    stop_flag = mp.Value('b', False)
+    action_queues = [Queue() for _ in range(num_envs)]
+    result_queue = Queue()
+    rollout_queue = RolloutQueue(maxsize=queue_size)
+    
+    # Start environment worker processes
+    workers = []
+    for env_id in range(num_envs):
+        p = Process(
+            target=env_worker,
+            args=(env_id, action_queues[env_id], result_queue, stop_flag)
+        )
+        p.daemon = True
+        p.start()
+        workers.append(p)
+        time.sleep(0.4)
+    
+    # Thread stop flag (for clean shutdown)
+    thread_stop = [False]
+    
+    # Create and start threads
+    env_thread = threading.Thread(
+        target=environment_thread,
+        args=(
+            agent, 
+            rollout_steps, 
+            action_queues, 
+            result_queue, 
+            rollout_queue, 
+            out_episodes, 
+            thread_stop,
+            num_envs,
+            phase_coordinator  # Add phase coordinator
+        )
+    )
+    
+    train_thread = threading.Thread(
+        target=training_thread,
+        args=(
+            agent, 
+            pretrained_policy, 
+            rollout_queue, 
+            thread_stop, 
+            num_iterations,
+            phase_coordinator  # Add phase coordinator
+        )
+    )
+    
+    print("Starting threads...")
+    env_thread.start()
+    train_thread.start()
+    
+    try:
+        # Wait for training thread to complete
+        train_thread.join()
+    except KeyboardInterrupt:
+        print("Interrupted by user, stopping threads and processes...")
+    finally:
+        # Signal threads and processes to stop
+        print("Setting stop flag...")
+        thread_stop[0] = True
+        stop_flag.value = True
+        
+        # Signal all workers to exit
+        for q in action_queues:
+            try:
+                q.put(None)  # Signal to exit
+            except:
+                pass
+        
+        # Wait for threads to finish
+        print("Waiting for threads to finish...")
+        env_thread.join(timeout=10)
+        train_thread.join(timeout=5)
+        
+        # Wait for workers to finish
+        print("Waiting for worker processes to finish...")
+        for i, p in enumerate(workers):
+            p.join(timeout=5)
+            if p.is_alive():
+                print(f"Worker {i} did not terminate, force killing...")
+                p.terminate()
+        
+        # Close dummy environment
+        dummy_env.close()
+        
+        # Save weights
+        print(f"Saving weights to {out_weights}")
+        th.save(agent.policy.state_dict(), out_weights)
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--in-model", required=True, type=str)
+    parser.add_argument("--in-weights", required=True, type=str)
+    parser.add_argument("--out-weights", required=True, type=str)
+    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
+    parser.add_argument("--num-iterations", required=False, type=int, default=10)
+    parser.add_argument("--rollout-steps", required=False, type=int, default=40)
+    parser.add_argument("--num-envs", required=False, type=int, default=4)
+    parser.add_argument("--queue-size", required=False, type=int, default=3,
+                       help="Size of the queue between environment and training threads")
+
+    args = parser.parse_args()
+    
+    # Check for auxiliary value head in weights
+    weights = th.load(args.in_weights, map_location="cpu")
+    has_aux_head = any('aux' in key for key in weights.keys())
+    print(f"Model weights {'have' if has_aux_head else 'do not have'} auxiliary value head keys")
+
+    train_rl_mp(
+        in_model=args.in_model,
+        in_weights=args.in_weights,
+        out_weights=args.out_weights,
+        out_episodes=args.out_episodes,
+        num_iterations=args.num_iterations,
+        rollout_steps=args.rollout_steps,
+        num_envs=args.num_envs,
+        queue_size=args.queue_size
+    )
