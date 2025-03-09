@@ -559,7 +559,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         continue
                     
                     # Extract auxiliary value predictions and returns
-                    batch_aux_vpreds = th.cat([t["aux_v_pred"].unsqueeze(0) for t in batch_transitions])
+                    batch_aux_vpreds = th.cat([t["aux_v_pred"].detach().unsqueeze(0) for t in batch_transitions])
                     batch_returns = th.tensor([t["return"] for t in batch_transitions], device="cuda")
                     
                     # Compute auxiliary value loss
