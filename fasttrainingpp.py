@@ -510,28 +510,29 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                             
                             # Policy distillation loss (joint policy update in auxiliary phase)
                             policy_distill_losses = []
-                            if i == 0:  
-                                print(f"[DISTILL-DEBUG] Comparing transition distributions")
-                                # Check for exact tensor identity (not just value equality)
-                                for key in cur_pd:
-                                    if cur_pd[key] is orig_pd[key]:  # Check if they're the same tensor object
-                                        print(f"[DISTILL-ERROR] Key {key}: Current and original policy are THE SAME TENSOR!")
-                                    else:
-                                        # Print a few values to see if they differ
-                                        if cur_pd[key].dim() > 0 and cur_pd[key].shape[0] > 0:
-                                            max_diff = (cur_pd[key] - orig_pd[key]).abs().max().item()
-                                            print(f"[DISTILL-DEBUG] Max diff for {key}: {max_diff:.8f}")
-                                pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"DISTILL-{aux_iter}")
-                            else:
-                                pd_loss = compute_kl_loss(cur_pd, orig_pd)
                             for i, t in enumerate(transitions):
                                 cur_pd = t["cur_pd"]
                                 orig_pd = original_policy_dists[i]
-                                pd_loss = compute_kl_loss(cur_pd, orig_pd)
+                                
+                                # Debug: Compare specific transitions periodically
+                                if i == 0:
+                                    print(f"[DISTILL-DEBUG] Comparing transition {i} distributions")
+                                    pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"DISTILL-T{i}")
+                                else:
+                                    pd_loss = compute_kl_loss(cur_pd, orig_pd)
+                                
                                 policy_distill_losses.append(pd_loss)
                             
                             policy_distill_loss = th.stack(policy_distill_losses).mean()
-                            
+                            if aux_iter > 0 and rollout_idx == 0:
+                                # Check if policy is changing during optimization
+                                first_trans_cur = transitions[0]["cur_pd"]
+                                first_trans_orig = original_policy_dists[0]
+                                
+                                for key in first_trans_cur.keys():
+                                    if first_trans_cur[key].ndim > 0 and first_trans_cur[key].shape[0] > 0:
+                                        diff = (first_trans_cur[key] - first_trans_orig[key]).abs().max().item()
+                                        print(f"[UPDATE-DEBUG] Max policy diff for {key}: {diff:.8f}")
                             # Total auxiliary phase loss
                             loss = (AUX_VALUE_LOSS_COEF * aux_value_loss + 
                                    PPG_BETA_CLONE * policy_distill_loss)
@@ -653,8 +654,15 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                     
                     # KL divergence loss
                     kl_losses = []
-                    for t in env_transitions:
-                        kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                    # for t in env_transitions:
+                    #     kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                    #     kl_losses.append(kl_loss)
+                    for t_idx, t in enumerate(env_transitions):
+                        # Debug every 50th transition or just the first one
+                        if t_idx == 0 or t_idx % 50 == 0:
+                            kl_loss = compute_kl_loss_debug(t["cur_pd"], t["old_pd"], debug_tag=f"POLICY-T{t_idx}")
+                        else:
+                            kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
                         kl_losses.append(kl_loss)
                     kl_loss = th.stack(kl_losses).mean()
                     
