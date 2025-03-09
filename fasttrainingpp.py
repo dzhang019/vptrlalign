@@ -465,8 +465,39 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 pi_update_counter = 0
                 stored_rollouts = []
                 continue
+                
+            # Process all rollouts once to capture original policy distributions
+            all_transitions_by_rollout = []
+            all_original_dists_by_rollout = []
             
-            # Do multiple auxiliary updates
+            print("[Training Thread] Computing original policy distributions for all rollouts...")
+            
+            for rollout in flat_rollouts:
+                # Process rollout into transitions
+                transitions = train_unroll(
+                    agent,
+                    pretrained_policy,
+                    rollout,
+                    gamma=GAMMA,
+                    lam=LAM
+                )
+                
+                if len(transitions) == 0:
+                    all_transitions_by_rollout.append([])
+                    all_original_dists_by_rollout.append([])
+                    continue
+                    
+                # Store original policy distributions
+                original_dists = []
+                for t in transitions:
+                    # Create a deep copy of the current policy distribution
+                    orig_pd = {k: v.clone().detach() for k, v in t["cur_pd"].items()}
+                    original_dists.append(orig_pd)
+                    
+                all_transitions_by_rollout.append(transitions)
+                all_original_dists_by_rollout.append(original_dists)
+            
+            # Perform multiple auxiliary updates
             for aux_iter in range(PPG_N_AUX_UPDATES):
                 print(f"[Training Thread] Auxiliary update {aux_iter+1}/{PPG_N_AUX_UPDATES}")
                 
@@ -475,27 +506,13 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 total_policy_distill_loss = 0.0
                 total_rollouts = 0
                 
-                # Process each rollout
+                # Zero gradients at the start of each auxiliary update
                 optimizer.zero_grad()
                 
-                for rollout_idx, rollout in enumerate(flat_rollouts):
-                    # Process this rollout into transitions
-                    transitions = train_unroll(
-                        agent,
-                        pretrained_policy, 
-                        rollout,
-                        gamma=GAMMA,
-                        lam=LAM
-                    )
-                    
+                # Process each rollout
+                for rollout_idx, (transitions, original_dists) in enumerate(zip(all_transitions_by_rollout, all_original_dists_by_rollout)):
                     if len(transitions) == 0:
                         continue
-                    
-                    # Get policy distributions before update
-                    original_policy_dists = []
-                    for t in transitions:
-                        # Store the current policy distribution
-                        original_policy_dists.append({k: v.clone().detach() for k, v in t["cur_pd"].items()})
                     
                     # Extract value targets
                     returns = th.tensor([t["return"] for t in transitions], device="cuda")
@@ -508,34 +525,37 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                             # Auxiliary value loss
                             aux_value_loss = ((aux_vpreds - returns) ** 2).mean()
                             
-                            # Policy distillation loss (joint policy update in auxiliary phase)
+                            # Policy distillation loss using original stored distributions
                             policy_distill_losses = []
                             for i, t in enumerate(transitions):
+                                # Get current policy distribution (after potential updates)
                                 cur_pd = t["cur_pd"]
-                                orig_pd = original_policy_dists[i]
+                                # Get original policy distribution (from before updates)
+                                orig_pd = original_dists[i]
                                 
-                                # Debug: Compare specific transitions periodically
-                                if i == 0:
-                                    print(f"[DISTILL-DEBUG] Comparing transition {i} distributions")
-                                    pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"DISTILL-T{i}")
+                                # Debug comparison for the first transition
+                                if i == 0 and rollout_idx == 0:
+                                    print(f"[DISTILL-DEBUG] Comparing transition distributions at update {aux_iter+1}")
+                                    # Check if distributions are different
+                                    for key in cur_pd:
+                                        if cur_pd[key].ndim > 0 and cur_pd[key].shape[0] > 0:
+                                            max_diff = (cur_pd[key] - orig_pd[key]).abs().max().item()
+                                            is_same_tensor = cur_pd[key] is orig_pd[key]
+                                            print(f"[DISTILL-DEBUG] Key {key}: max_diff={max_diff:.8f}, same_tensor={is_same_tensor}")
+                                    
+                                    # Use debugging KL function
+                                    pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"DISTILL-{aux_iter+1}")
                                 else:
                                     pd_loss = compute_kl_loss(cur_pd, orig_pd)
                                 
                                 policy_distill_losses.append(pd_loss)
                             
+                            # Average policy distillation loss across all transitions
                             policy_distill_loss = th.stack(policy_distill_losses).mean()
-                            if aux_iter > 0 and rollout_idx == 0:
-                                # Check if policy is changing during optimization
-                                first_trans_cur = transitions[0]["cur_pd"]
-                                first_trans_orig = original_policy_dists[0]
-                                
-                                for key in first_trans_cur.keys():
-                                    if first_trans_cur[key].ndim > 0 and first_trans_cur[key].shape[0] > 0:
-                                        diff = (first_trans_cur[key] - first_trans_orig[key]).abs().max().item()
-                                        print(f"[UPDATE-DEBUG] Max policy diff for {key}: {diff:.8f}")
+                            
                             # Total auxiliary phase loss
                             loss = (AUX_VALUE_LOSS_COEF * aux_value_loss + 
-                                   PPG_BETA_CLONE * policy_distill_loss)
+                                PPG_BETA_CLONE * policy_distill_loss)
                         
                         # Backward pass
                         scaler.scale(loss).backward()
@@ -558,13 +578,54 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 scaler.update()
                 optimizer.zero_grad()
                 
+                # After the model update, if needed, re-run the forward pass
+                # to update the policy distributions for the next iteration
+                if aux_iter < PPG_N_AUX_UPDATES - 1:  # No need to update on the last iteration
+                    print("[Training Thread] Updating policy distributions after parameter update...")
+                    for rollout_idx, transitions in enumerate(all_transitions_by_rollout):
+                        if len(transitions) == 0:
+                            continue
+                        
+                        # Re-run forward pass for a few random transitions to verify policy is changing
+                        if rollout_idx == 0 and len(transitions) > 0:
+                            sample_idx = min(len(transitions) - 1, 0)
+                            t = transitions[sample_idx]
+                            
+                            # Get fresh policy distribution with updated parameters
+                            with th.no_grad():
+                                agent_input = agent._env_obs_to_agent(t["obs"])
+                                # Forward pass through the updated policy
+                                _, _, result = agent.policy.act_train(
+                                    agent_input,
+                                    agent._dummy_first,
+                                    None,  # For single-step, no need for state
+                                    return_pd=True
+                                )
+                                
+                                # Compare old and new distributions
+                                new_pd = result["pd"]
+                                old_pd = t["cur_pd"]
+                                orig_pd = all_original_dists_by_rollout[rollout_idx][sample_idx]
+                                
+                                print(f"[UPDATE-CHECK] Policy changes after update {aux_iter+1}:")
+                                for key in new_pd:
+                                    if new_pd[key].ndim > 0 and new_pd[key].shape[0] > 0:
+                                        # Diff between current and pre-update
+                                        max_diff_current = (new_pd[key] - old_pd[key]).abs().max().item()
+                                        # Diff between current and original
+                                        max_diff_orig = (new_pd[key] - orig_pd[key]).abs().max().item()
+                                        print(f"  Key {key}: diff_from_current={max_diff_current:.6f}, diff_from_original={max_diff_orig:.6f}")
+                                
+                                # Update the stored policy distribution for this transition
+                                for k, v in new_pd.items():
+                                    t["cur_pd"][k] = v.clone()
+                
                 # Report statistics
-                if total_rollouts > 0:
-                    avg_aux_value_loss = total_aux_value_loss / total_rollouts
-                    avg_policy_distill_loss = total_policy_distill_loss / total_rollouts
-                    print(f"[Training Thread] Aux update {aux_iter+1} - "
-                          f"AuxValueLoss={avg_aux_value_loss:.4f}, "
-                          f"PolicyDistillLoss={avg_policy_distill_loss:.4f}")
+                avg_aux_value_loss = total_aux_value_loss / max(1, total_rollouts)
+                avg_policy_distill_loss = total_policy_distill_loss / max(1, total_rollouts)
+                print(f"[Training Thread] Aux update {aux_iter+1} - "
+                    f"AuxValueLoss={avg_aux_value_loss:.4f}, "
+                    f"PolicyDistillLoss={avg_policy_distill_loss:.4f}")
             
             # End auxiliary phase and signal environment thread
             phase_coordinator.end_auxiliary_phase()
