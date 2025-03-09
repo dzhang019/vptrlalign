@@ -446,194 +446,217 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                          len(stored_rollouts) > 0)
         
         if do_aux_phase:
-    # ===== AUXILIARY PHASE (SLEEP CYCLES) =====
-    # Signal start of auxiliary phase
+            # Signal start of auxiliary phase
             phase_coordinator.start_auxiliary_phase()
             print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
             
-            # Use only the most recent rollouts to match OpenAI's approach
-            # We need to match approximately 1920 transitions (their full wake phase)
+            # Use only a limited number of most recent rollouts
+            max_rollouts = 10  # Process far fewer rollouts to save memory
             recent_rollouts = []
-            total_transitions_count = 0
             
-            # Iterate through stored rollouts from newest to oldest
-            for rollout_set in reversed(stored_rollouts):
-                for env_rollout in rollout_set:
+            # Take one rollout from each environment from the most recent iteration
+            if stored_rollouts:
+                recent_set = stored_rollouts[-1]
+                for env_rollout in recent_set:
                     if len(env_rollout["obs"]) > 0:
                         recent_rollouts.append(env_rollout)
-                        total_transitions_count += len(env_rollout["obs"])
-                
-                # If we've collected enough transitions, stop
-                if total_transitions_count >= 1920:
-                    break
+                        if len(recent_rollouts) >= max_rollouts:
+                            break
             
-            # Reverse to restore chronological order
-            recent_rollouts.reverse()
-            
-            print(f"[Training Thread] Using {len(recent_rollouts)} rollouts with ~{total_transitions_count} transitions for auxiliary phase")
+            print(f"[Training Thread] Using {len(recent_rollouts)} rollouts for auxiliary phase")
             
             # Skip if no valid rollouts
-            if len(recent_rollouts) == 0:
+            if not recent_rollouts:
                 print("[Training Thread] No valid rollouts for auxiliary phase, skipping")
                 phase_coordinator.end_auxiliary_phase()
                 pi_update_counter = 0
                 stored_rollouts = []
                 continue
             
-            # Store auxiliary data keyed by rollout object id
-            aux_data = {}
-            
-            # Perform 2 sleep cycles as per OpenAI's implementation
-            for sleep_cycle in range(2):  # OpenAI: "two sleep cycles"
+            # Perform 2 sleep cycles with much smaller chunks and CPU offloading
+            for sleep_cycle in range(2):
                 print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2")
-                
-                # Track statistics for this sleep cycle
                 total_aux_value_loss = 0.0
                 total_policy_distill_loss = 0.0
-                total_transitions = 0
+                total_processed = 0
                 
-                # Process each rollout separately to maintain sequence integrity
+                # Process one rollout at a time, completely
                 for rollout_idx, rollout in enumerate(recent_rollouts):
+                    # Skip after processing a few rollouts if memory is tight
+                    if rollout_idx >= 5 and sleep_cycle > 0:
+                        continue
+                        
+                    # Get transitions - but use a simpler method for the second sleep cycle
+                    if sleep_cycle == 0:
+                        # First sleep cycle - compute transitions and store raw observations
+                        with th.no_grad():
+                            # Process rollout to get transitions
+                            transitions = train_unroll(agent, pretrained_policy, rollout, gamma=GAMMA, lam=LAM)
+                            
+                            if not transitions:
+                                continue
+                            
+                            # Store original policy distributions separately
+                            # Use CPU storage to save GPU memory
+                            rollout_id = id(rollout)
+                            obs_list = [t["obs"] for t in transitions]
+                            returns = [t["return"] for t in transitions]
+                            
+                            # Create storage for this rollout
+                            if rollout_idx < 5:  # Only store for first few rollouts
+                                # Get original policy distributions for each observation
+                                orig_button_logits = []
+                                orig_camera_logits = []
+                                
+                                for t in transitions:
+                                    # Move policy distributions to CPU to save memory
+                                    for k, v in t["cur_pd"].items():
+                                        orig_logits = v.clone().cpu()
+                                        if k == "buttons":
+                                            orig_button_logits.append(orig_logits)
+                                        elif k == "camera":
+                                            orig_camera_logits.append(orig_logits)
+                                
+                                # Store data
+                                aux_data[rollout_id] = {
+                                    'obs': obs_list,
+                                    'returns': returns,
+                                    'orig_button_logits': orig_button_logits,
+                                    'orig_camera_logits': orig_camera_logits
+                                }
+                    
+                    # For both sleep cycles, process in very small chunks
                     rollout_id = id(rollout)
                     
-                    # Process this rollout into transitions only once, on first sleep cycle
-                    if sleep_cycle == 0 or rollout_id not in aux_data:
-                        transitions = train_unroll(
-                            agent,
-                            pretrained_policy,
-                            rollout,
-                            gamma=GAMMA,
-                            lam=LAM
-                        )
+                    # Skip if no data for this rollout
+                    if sleep_cycle > 0 and (rollout_id not in aux_data or rollout_idx >= 5):
+                        continue
                         
-                        if len(transitions) == 0:
-                            continue
-                        
-                        # Store transitions for reuse in second sleep cycle
-                        if rollout_id not in aux_data:
-                            aux_data[rollout_id] = {}
-                        aux_data[rollout_id]['transitions'] = transitions
-                        
-                        # On first sleep cycle, store original policy distributions
-                        if sleep_cycle == 0:
-                            aux_data[rollout_id]['original_dists'] = [{k: v.clone().detach() for k, v in t["cur_pd"].items()} 
-                                                        for t in transitions]
-                    else:
-                        # Reuse stored transitions on second sleep cycle
-                        transitions = aux_data[rollout_id]['transitions']
-                        
-                        # Re-compute current policy distributions with updated parameters
-                        # This is critical for policy distillation to work correctly
-                        if sleep_cycle > 0:
-                            for i, t in enumerate(transitions):
-                                # Only recompute a subset to save memory if transitions is large
-                                if len(transitions) > 100 and i % 2 != 0:
-                                    continue
-                                    
-                                # Get fresh policy distribution with current model parameters
-                                with th.no_grad():
-                                    agent_input = agent._env_obs_to_agent(t["obs"])
-                                    _, _, result = agent.policy.act_train(
-                                        agent_input, 
-                                        agent._dummy_first, 
-                                        None,  # No hidden state for single-step inference
-                                        return_pd=True
-                                    )
-                                    
-                                    # Update current policy distribution
-                                    t["cur_pd"] = result["pd"]
+                    # Get stored observations and returns
+                    obs_list = aux_data[rollout_id]['obs'] if rollout_id in aux_data else []
+                    returns = aux_data[rollout_id]['returns'] if rollout_id in aux_data else []
                     
-                    # If rollout is too large, process in chunks to manage memory
-                    chunk_size = min(128, len(transitions))
-                    for chunk_start in range(0, len(transitions), chunk_size):
-                        chunk_end = min(chunk_start + chunk_size, len(transitions))
-                        chunk_transitions = transitions[chunk_start:chunk_end]
+                    # Process in very small chunks to minimize memory usage
+                    chunk_size = 10  # Much smaller chunks
+                    for chunk_start in range(0, len(obs_list), chunk_size):
+                        # Clear memory before processing each chunk
+                        th.cuda.empty_cache()
                         
-                        # Zero gradients before processing this chunk
+                        chunk_end = min(chunk_start + chunk_size, len(obs_list))
+                        chunk_obs = obs_list[chunk_start:chunk_end]
+                        chunk_returns = returns[chunk_start:chunk_end]
+                        
                         optimizer.zero_grad()
                         
-                        # Extract auxiliary value predictions and returns
-                        if "aux_v_pred" in chunk_transitions[0]:
-                            returns = th.tensor([t["return"] for t in chunk_transitions], device="cuda")
-                            aux_vpreds = th.cat([t["aux_v_pred"].unsqueeze(0) for t in chunk_transitions])
-                            
-                            with autocast():
-                                # Auxiliary value loss
-                                aux_value_loss = ((aux_vpreds - returns) ** 2).mean()
+                        # Get current auxiliary value predictions
+                        aux_vpreds = []
+                        current_pd_dict = {'buttons': [], 'camera': []}
+                        
+                        # Forward pass for each observation
+                        for obs in chunk_obs:
+                            with th.no_grad():
+                                # Get policy predictions
+                                agent_input = agent._env_obs_to_agent(obs)
+                                _, _, result = agent.policy.act_train(
+                                    agent_input, agent._dummy_first, None, return_pd=True
+                                )
                                 
-                                # Policy distillation loss
+                                # Extract predictions
+                                aux_vpreds.append(result["aux_vpred"])
+                                
+                                # Extract policy distributions
+                                for k, v in result["pd"].items():
+                                    current_pd_dict[k].append(v)
+                        
+                        # Convert to tensors
+                        aux_vpreds = th.stack(aux_vpreds)
+                        returns_tensor = th.tensor(chunk_returns, device="cuda")
+                        
+                        with autocast():
+                            # Auxiliary value loss
+                            aux_value_loss = ((aux_vpreds - returns_tensor) ** 2).mean()
+                            
+                            # Policy distillation loss
+                            if sleep_cycle > 0 and rollout_id in aux_data:
                                 policy_distill_losses = []
-                                for i, t in enumerate(chunk_transitions):
-                                    # Get current policy distribution (updated if sleep_cycle > 0)
-                                    cur_pd = t["cur_pd"]
-                                    # Get original policy distribution (from first computation)
-                                    orig_pd = aux_data[rollout_id]['original_dists'][chunk_start + i]
+                                
+                                # Get original logits for this chunk
+                                orig_button_chunk = aux_data[rollout_id]['orig_button_logits'][chunk_start:chunk_end]
+                                orig_camera_chunk = aux_data[rollout_id]['orig_camera_logits'][chunk_start:chunk_end]
+                                
+                                # Create dictionary format for KL calculation
+                                for i in range(len(chunk_obs)):
+                                    cur_pd = {
+                                        'buttons': current_pd_dict['buttons'][i],
+                                        'camera': current_pd_dict['camera'][i]
+                                    }
                                     
-                                    # Debug first transition in first chunk of first rollout
+                                    orig_pd = {
+                                        'buttons': orig_button_chunk[i].to("cuda"),
+                                        'camera': orig_camera_chunk[i].to("cuda")
+                                    }
+                                    
+                                    # Debug the first sample
                                     if rollout_idx == 0 and chunk_start == 0 and i == 0:
-                                        print(f"[SLEEP-{sleep_cycle+1}] Checking policy distributions:")
                                         pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"SLEEP-{sleep_cycle+1}")
                                     else:
                                         pd_loss = compute_kl_loss(cur_pd, orig_pd)
                                     
                                     policy_distill_losses.append(pd_loss)
                                 
-                                # Compute average policy distillation loss
                                 if policy_distill_losses:
                                     policy_distill_loss = th.stack(policy_distill_losses).mean()
+                                    loss = 0.5 * aux_value_loss + 1.0 * policy_distill_loss
                                     
-                                    # Total auxiliary phase loss - using OpenAI hyperparameters:
-                                    # PPG sleep value-function coefficient: 0.5
-                                    # PPG sleep KL coefficient: 1.0
-                                    loss = (0.5 * aux_value_loss + 1.0 * policy_distill_loss)
-                                    
-                                    # Backward pass
-                                    scaler.scale(loss).backward()
-                                    
-                                    # Update statistics
-                                    total_aux_value_loss += aux_value_loss.item() * len(chunk_transitions)
-                                    total_policy_distill_loss += policy_distill_loss.item() * len(chunk_transitions)
-                                    total_transitions += len(chunk_transitions)
+                                    total_policy_distill_loss += policy_distill_loss.item() * len(chunk_obs)
+                                else:
+                                    loss = 0.5 * aux_value_loss
+                            else:
+                                # Just value loss in first sleep cycle
+                                loss = 0.5 * aux_value_loss
                         
-                        # Apply gradients after processing this chunk
+                        # Backward and update
+                        scaler.scale(loss).backward()
                         scaler.unscale_(optimizer)
                         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
                         scaler.step(optimizer)
                         scaler.update()
                         
-                        # Clear memory
+                        # Update stats
+                        total_aux_value_loss += aux_value_loss.item() * len(chunk_obs)
+                        total_processed += len(chunk_obs)
+                        
+                        # Clear CUDA cache
                         th.cuda.empty_cache()
                 
-                # Report statistics for this sleep cycle
-                if total_transitions > 0:
-                    avg_aux_value_loss = total_aux_value_loss / total_transitions
-                    avg_policy_distill_loss = total_policy_distill_loss / total_transitions
+                # Report sleep cycle stats
+                if total_processed > 0:
+                    avg_aux_value_loss = total_aux_value_loss / total_processed
+                    avg_policy_distill_loss = total_policy_distill_loss / max(1, total_processed)
                     print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2 - "
                         f"AuxValueLoss={avg_aux_value_loss:.4f}, "
                         f"PolicyDistillLoss={avg_policy_distill_loss:.4f}, "
-                        f"Transitions={total_transitions}")
-                else:
-                    print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2 - No valid transitions processed")
+                        f"Transitions={total_processed}")
             
-            # Cleanup
+            # Clear all auxiliary data
             aux_data.clear()
             
-            # End auxiliary phase and signal environment thread
+            # End auxiliary phase
             phase_coordinator.end_auxiliary_phase()
-            print("[Training Thread] Auxiliary phase complete, resuming experience collection")
+            print("[Training Thread] Auxiliary phase complete")
             
-            # Process any buffered rollouts that were collected during auxiliary phase
+            # Process buffered rollouts
             buffered_rollouts = phase_coordinator.get_buffered_rollouts()
             if buffered_rollouts:
                 print(f"[Training Thread] Processing {len(buffered_rollouts)} buffered rollouts")
                 for rollout in buffered_rollouts:
                     rollout_queue.put(rollout)
             
-            # Reset tracking variables
+            # Reset counters
             pi_update_counter = 0
             stored_rollouts = []
             
-            # Final memory cleanup
+            # Final cleanup
             th.cuda.empty_cache()
             
         else:
