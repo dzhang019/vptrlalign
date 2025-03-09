@@ -420,9 +420,7 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
 
 # Run a PPG sleep phase
 def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
-    """
-    Run the PPG auxiliary phase (sleep phase) on the provided rollouts.
-    """
+    """Run the PPG auxiliary phase (sleep phase) on the provided rollouts."""
     # Check if agent has auxiliary value head
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if not has_aux_head:
@@ -431,140 +429,121 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     
     print(f"[Sleep Phase] Running with {len(recent_rollouts)} rollouts")
     
-    # Process each rollout individually to avoid memory explosion
+    # Process rollouts to get transitions
+    all_transitions = []
+    for rollout_idx, rollout in enumerate(recent_rollouts):
+        if len(rollout["obs"]) == 0:
+            continue
+            
+        print(f"[Sleep Phase] Processing rollout {rollout_idx+1}/{len(recent_rollouts)}")
+        transitions = train_unroll(agent, agent, rollout)
+        all_transitions.extend(transitions)
+    
+    # Get original policy distributions before any updates
+    if len(all_transitions) > 0:
+        with th.no_grad():
+            all_obs = [t["obs"] for t in all_transitions]
+            all_actions = [t["action"] for t in all_transitions]
+            
+            # Get policy distributions in one call
+            pi_dist_seq, _, _, _, _ = agent.get_sequence_and_training_info(
+                minerl_obs_list=all_obs,
+                initial_hidden_state=agent.policy.initial_state(1),
+                stochastic=False,
+                taken_actions_list=all_actions
+            )
+            
+            # Store original distributions
+            for i, t in enumerate(all_transitions):
+                t["orig_pd"] = {k: v[i].clone().detach() for k, v in pi_dist_seq.items()}
+    
+    # Process sleep cycles
     for sleep_cycle in range(2):
         print(f"[Sleep Phase] Running sleep cycle {sleep_cycle+1}/2")
         
-        # Track statistics
+        # Process in mini-batches to manage memory
+        mini_batch_size = 32
         aux_value_loss_sum = 0.0
         policy_distill_loss_sum = 0.0
         num_transitions = 0
         
-        # Process each rollout separately
-        for rollout_idx, rollout in enumerate(recent_rollouts):
-            if len(rollout["obs"]) == 0:
-                continue
+        
+        for batch_start in range(0, len(all_transitions), mini_batch_size):
+            batch_end = min(batch_start + mini_batch_size, len(all_transitions))
+            batch = all_transitions[batch_start:batch_end]
+            
+            # Always zero gradients before each batch
+            optimizer.zero_grad()
+            
+            # Get returns from transitions
+            returns = th.tensor([t["return"] for t in batch], device="cuda")
+            
+            # Get observations and actions for this batch
+            batch_obs = [t["obs"] for t in batch]
+            batch_actions = [t["action"] for t in batch]
+            
+            # Run forward with gradients for fresh predictions
+            with th.enable_grad():
+                # Get fresh forward pass with gradients
+                outputs = agent.get_sequence_and_training_info(
+                    minerl_obs_list=batch_obs,
+                    initial_hidden_state=agent.policy.initial_state(1),
+                    stochastic=False,
+                    taken_actions_list=batch_actions
+                )
                 
-            print(f"[Sleep Phase] Processing rollout {rollout_idx+1}/{len(recent_rollouts)} in cycle {sleep_cycle+1}/2")
+                # Extract predictions from outputs
+                if len(outputs) == 5:  # With auxiliary value head
+                    curr_pi_dist, _, aux_vpreds, _, _ = outputs
+                else:
+                    # Fallback if no auxiliary value head
+                    print("[Sleep Phase] Error: No auxiliary value predictions in outputs")
+                    continue
             
-            # Very small batch size to control memory usage
-            mini_batch_size = 8
-            
-            # Process rollout to get transitions and returns
-            transitions = train_unroll(agent, agent, rollout)
-            
-            if len(transitions) == 0:
-                continue
-                
-            # For first cycle: only train auxiliary value function
-            # For second cycle: need to also get original policy distributions for policy distillation
-            if sleep_cycle == 1:
-                # Get original distributions before updating in second cycle
-                with th.no_grad():
-                    obs_seq = rollout["obs"]
-                    act_seq = rollout["actions"]
-                    init_state = rollout["hidden_states"][0]
+            # Calculate auxiliary value loss
+            try:
+                with th.autocast(device_type='cuda'):
+                    # Auxiliary value loss
+                    aux_value_loss = ((aux_vpreds - returns) ** 2).mean()
                     
-                    seq_outputs = agent.get_sequence_and_training_info(
-                        minerl_obs_list=obs_seq,
-                        initial_hidden_state=init_state,
-                        stochastic=False,
-                        taken_actions_list=act_seq
-                    )
-                    
-                    if len(seq_outputs) >= 5:
-                        pi_dist_seq = seq_outputs[0]
-                        # Store original distributions (detached)
-                        orig_dists = [{k: v[i].clone().detach() for k, v in pi_dist_seq.items()} 
-                                     for i in range(len(obs_seq))]
+                    # Policy distillation loss (only in second cycle)
+                    if sleep_cycle == 1:
+                        policy_distill_losses = []
+                        for i, t in enumerate(batch):
+                            # Original policy distribution
+                            orig_pd = t["orig_pd"]
+                            # Current policy distribution
+                            curr_pd = {k: curr_pi_dist[k][i] for k in curr_pi_dist.keys()}
+                            # KL divergence
+                            kl_loss = compute_kl_loss(curr_pd, orig_pd)
+                            policy_distill_losses.append(kl_loss)
+                        
+                        policy_distill_loss = th.stack(policy_distill_losses).mean()
+                        loss = aux_value_loss + beta_clone * policy_distill_loss
+                        policy_distill_loss_val = policy_distill_loss.item()
                     else:
-                        # Fallback if we don't get expected outputs
-                        orig_dists = None
+                        # First cycle: only auxiliary value loss
+                        loss = aux_value_loss
+                        policy_distill_loss_val = 0.0
+                
+                # Backward and optimize
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
+                scaler.step(optimizer)
+                scaler.update()
+                
+                # Update statistics
+                aux_value_loss_sum += aux_value_loss.item() * len(batch)
+                policy_distill_loss_sum += policy_distill_loss_val * len(batch)
+                num_transitions += len(batch)
+                
+            except Exception as e:
+                print(f"[Sleep Phase] Error during optimization: {e}")
+                # Clear any hanging gradients
+                optimizer.zero_grad()
             
-            # Process in mini-batches to control memory usage
-            for batch_start in range(0, len(transitions), mini_batch_size):
-                # Clear CUDA cache before each batch
-                th.cuda.empty_cache()
-                
-                batch_end = min(batch_start + mini_batch_size, len(transitions))
-                batch = transitions[batch_start:batch_end]
-                
-                # Get returns from transitions
-                returns = th.tensor([t["return"] for t in batch], device="cuda")
-                
-                # Extract auxiliary value predictions
-                if all("aux_v_pred" in t for t in batch):
-                    # Completely detach and create fresh tensors
-                    aux_vpreds = th.cat([t["aux_v_pred"].detach().reshape(1) for t in batch])
-                    
-                    # Zero gradients
-                    optimizer.zero_grad()
-                    
-                    # Compute losses
-                    try:
-                        with th.autocast(device_type='cuda'):
-                            # Auxiliary value loss
-                            aux_value_loss = ((aux_vpreds - returns) ** 2).mean()
-                            
-                            # Second cycle: add policy distillation loss
-                            if sleep_cycle == 1 and orig_dists is not None:
-                                # Recompute current policy distributions
-                                curr_batch_obs = [t["obs"] for t in batch]
-                                curr_batch_actions = [t["action"] for t in batch]
-                                
-                                # Forward pass to get current distributions
-                                curr_outputs = agent.get_sequence_and_training_info(
-                                    minerl_obs_list=curr_batch_obs,
-                                    initial_hidden_state=agent.policy.initial_state(1),
-                                    stochastic=False,
-                                    taken_actions_list=curr_batch_actions
-                                )
-                                
-                                if len(curr_outputs) >= 5:
-                                    curr_pi_seq = curr_outputs[0]
-                                    
-                                    # Compute KL divergence with original distributions
-                                    kl_losses = []
-                                    for i, _ in enumerate(batch):
-                                        curr_pd = {k: v[i].clone() for k, v in curr_pi_seq.items()}
-                                        orig_pd = orig_dists[batch_start + i]
-                                        
-                                        kl_loss = compute_kl_loss(curr_pd, orig_pd)
-                                        kl_losses.append(kl_loss)
-                                    
-                                    policy_distill_loss = th.stack(kl_losses).mean()
-                                    loss = aux_value_loss + beta_clone * policy_distill_loss
-                                    policy_distill_loss_val = policy_distill_loss.item()
-                                else:
-                                    # Fallback if we don't get expected outputs
-                                    loss = aux_value_loss
-                                    policy_distill_loss_val = 0.0
-                            else:
-                                # First cycle: only auxiliary value loss
-                                loss = aux_value_loss
-                                policy_distill_loss_val = 0.0
-                                
-                        # Backward and optimize - no retain_graph needed for fresh computation
-                        scaler.scale(loss).backward()
-                        scaler.unscale_(optimizer)
-                        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
-                        scaler.step(optimizer)
-                        scaler.update()
-                        
-                        # Update statistics
-                        aux_value_loss_sum += aux_value_loss.item() * len(batch)
-                        policy_distill_loss_sum += policy_distill_loss_val * len(batch)
-                        num_transitions += len(batch)
-                        
-                    except Exception as e:
-                        print(f"[Sleep Phase] Error during optimization: {e}")
-                        # Clear up any hanging gradients
-                        optimizer.zero_grad()
-                
-                # Clear memory after each batch
-                th.cuda.empty_cache()
-            
-            # Clear memory after each rollout
+            # Clear memory after each batch
             th.cuda.empty_cache()
         
         # Report statistics for this cycle
