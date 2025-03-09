@@ -594,8 +594,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 for name, param in agent.policy.aux_value_head.named_parameters():
                     print(f"  {name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
 
-                # After getting the aux_vpred_seq:
-                print(f"Raw aux_vpred_seq: {aux_vpred_seq}")
+                
                 print("Model attributes:", dir(agent.policy))
 
                 # Check if the attribute is properly initialized
@@ -612,6 +611,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         stochastic=False,
                         taken_actions_list=act_seq
                     )
+                    # After getting the aux_vpred_seq:
+                    print(f"Raw aux_vpred_seq: {aux_vpred_seq}")
                     print(f"Aux value range: {aux_vpred_seq.min().item()} to {aux_vpred_seq.max().item()}")
                     print(f"Returns range: {returns.min().item()} to {returns.max().item()}")
 
