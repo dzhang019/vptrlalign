@@ -359,14 +359,14 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]
     hidden_states_seq = rollout["hidden_states"]
 
-    pi_dist_seq, vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
+    pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hid = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=hidden_states_seq[0],
         stochastic=False,
         taken_actions_list=act_seq
     )
     
-    old_pi_dist_seq, old_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
+    old_pi_dist_seq, old_vpred_seq, aux_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
         stochastic=False,
@@ -384,6 +384,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             "reward": rollout["rewards"][t],
             "done": rollout["dones"][t],
             "v_pred": vpred_seq[t],
+            "aux_v_pred": aux_vpred_seq[t],
             "log_prob": log_prob_seq[t],
             "cur_pd": cur_pd_t,
             "old_pd": old_pd_t,
@@ -397,7 +398,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             hid_t_cpu = rollout["hidden_states"][-1]
             hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
             
-            _, _, v_next, _, _ = agent.get_action_and_training_info(
+            _, _, v_next, _, _, _ = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 hidden_state=hid_t,
                 stochastic=False,
