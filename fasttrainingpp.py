@@ -446,8 +446,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                          len(stored_rollouts) > 0)
         
         if do_aux_phase:
-            # ===== AUXILIARY PHASE (SLEEP CYCLES) =====
-            # Signal start of auxiliary phase
+    # ===== AUXILIARY PHASE (SLEEP CYCLES) =====
+    # Signal start of auxiliary phase
             phase_coordinator.start_auxiliary_phase()
             print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
             
@@ -480,6 +480,9 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 stored_rollouts = []
                 continue
             
+            # Store auxiliary data keyed by rollout object id
+            aux_data = {}
+            
             # Perform 2 sleep cycles as per OpenAI's implementation
             for sleep_cycle in range(2):  # OpenAI: "two sleep cycles"
                 print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2")
@@ -491,8 +494,10 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 
                 # Process each rollout separately to maintain sequence integrity
                 for rollout_idx, rollout in enumerate(recent_rollouts):
+                    rollout_id = id(rollout)
+                    
                     # Process this rollout into transitions only once, on first sleep cycle
-                    if sleep_cycle == 0 or not hasattr(rollout, "transitions"):
+                    if sleep_cycle == 0 or rollout_id not in aux_data:
                         transitions = train_unroll(
                             agent,
                             pretrained_policy,
@@ -505,15 +510,17 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                             continue
                         
                         # Store transitions for reuse in second sleep cycle
-                        rollout.transitions = transitions
+                        if rollout_id not in aux_data:
+                            aux_data[rollout_id] = {}
+                        aux_data[rollout_id]['transitions'] = transitions
                         
                         # On first sleep cycle, store original policy distributions
                         if sleep_cycle == 0:
-                            rollout.original_dists = [{k: v.clone().detach() for k, v in t["cur_pd"].items()} 
-                                                    for t in transitions]
+                            aux_data[rollout_id]['original_dists'] = [{k: v.clone().detach() for k, v in t["cur_pd"].items()} 
+                                                        for t in transitions]
                     else:
                         # Reuse stored transitions on second sleep cycle
-                        transitions = rollout.transitions
+                        transitions = aux_data[rollout_id]['transitions']
                         
                         # Re-compute current policy distributions with updated parameters
                         # This is critical for policy distillation to work correctly
@@ -560,7 +567,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                                     # Get current policy distribution (updated if sleep_cycle > 0)
                                     cur_pd = t["cur_pd"]
                                     # Get original policy distribution (from first computation)
-                                    orig_pd = rollout.original_dists[chunk_start + i]
+                                    orig_pd = aux_data[rollout_id]['original_dists'][chunk_start + i]
                                     
                                     # Debug first transition in first chunk of first rollout
                                     if rollout_idx == 0 and chunk_start == 0 and i == 0:
@@ -609,11 +616,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                     print(f"[Training Thread] Sleep cycle {sleep_cycle+1}/2 - No valid transitions processed")
             
             # Cleanup
-            for rollout in recent_rollouts:
-                if hasattr(rollout, "transitions"):
-                    delattr(rollout, "transitions")
-                if hasattr(rollout, "original_dists"):
-                    delattr(rollout, "original_dists")
+            aux_data.clear()
             
             # End auxiliary phase and signal environment thread
             phase_coordinator.end_auxiliary_phase()
