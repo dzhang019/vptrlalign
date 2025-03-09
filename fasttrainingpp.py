@@ -600,19 +600,45 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         stochastic=False,
                         taken_actions_list=act_seq
                     )
+                    print(f"Aux value range: {aux_vpred_seq.min().item()} to {aux_vpred_seq.max().item()}")
+                    print(f"Returns range: {returns.min().item()} to {returns.max().item()}")
+
+                    # Check for NaNs in the inputs
+                    if th.isnan(aux_vpred_seq).any():
+                        print("NaN detected in auxiliary value predictions")
+                    if th.isnan(returns).any():
+                        print("NaN detected in returns")
                     
                     # Auxiliary value loss
-                    aux_value_loss = ((aux_vpred_seq - returns) ** 2).mean()
+                    aux_value_loss = (th.clamp((aux_vpred_seq - returns), min=-100, max=100) ** 2).mean()
                     
                     # KL divergence loss (reuse from main phase)
                     kl_losses = []
                     for t_idx, t in enumerate(env_transitions):
                         # Get current policy distribution for this step
                         cur_pd_t = {k: v[t_idx] for k, v in pi_dist_seq.items()}
-                        kl_loss = compute_kl_loss(cur_pd_t, t["old_pd"])
-                        kl_losses.append(kl_loss)
-                    kl_loss = th.stack(kl_losses).mean()
-                    
+                        
+                        try:
+                            # Try computing KL loss with error handling
+                            kl_loss = compute_kl_loss(cur_pd_t, t["old_pd"])
+                            
+                            # Check for NaN and replace with a reasonable default if needed
+                            if th.isnan(kl_loss).any():
+                                print(f"Warning: NaN detected in KL loss, using default value")
+                                kl_loss = th.tensor(0.1, device="cuda")
+                                
+                            kl_losses.append(kl_loss)
+                        except Exception as e:
+                            print(f"Error in KL calculation: {e}")
+                            # Use a small default KL value
+                            kl_losses.append(th.tensor(0.1, device="cuda"))
+
+                    # Average losses with stability check
+                    if len(kl_losses) > 0:
+                        kl_loss = th.stack(kl_losses).mean()
+                    else:
+                        kl_loss = th.tensor(0.0, device="cuda")
+                                        
                     # Total auxiliary phase loss
                     env_loss = AUX_VALUE_LOSS_COEF * aux_value_loss + LAMBDA_KL * kl_loss
                 
