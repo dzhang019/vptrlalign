@@ -570,7 +570,11 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         # KL divergence loss
                         kl_losses = []
                         for t in batch_transitions:
-                            kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                            # Create detached, fresh tensor copies to avoid graph reuse
+                            cur_pd_detached = {k: v.detach() for k, v in t["cur_pd"].items()}
+                            old_pd_detached = {k: v.detach() for k, v in t["old_pd"].items()}
+                            
+                            kl_loss = compute_kl_loss(cur_pd_detached, old_pd_detached)
                             kl_losses.append(kl_loss)
                         kl_loss = th.stack(kl_losses).mean()
                         
