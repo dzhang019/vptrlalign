@@ -567,14 +567,14 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             total_aux_value_loss = 0
             total_kl_loss = 0
             valid_envs = 0
-            
-            # Process each environment separately (same as main phase)
+
+            # Process each environment separately
             for env_i, env_rollout in enumerate(aux_rollouts):
                 # Skip empty rollouts
                 if len(env_rollout["obs"]) == 0:
                     continue
                     
-                # Get fresh transitions from stored rollout
+                # Process this environment's rollout
                 env_transitions = train_unroll(
                     agent,
                     pretrained_policy,
@@ -586,72 +586,21 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 if len(env_transitions) == 0:
                     continue
                 
-                # Get observations and actions for fresh forward pass
-                obs_seq = [t["obs"] for t in env_transitions]
-                act_seq = [t["action"] for t in env_transitions]
-                returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
-                print("Auxiliary Value Head Parameters:")
-                for name, param in agent.policy.aux_value_head.named_parameters():
-                    print(f"  {name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
-
+                # Get returns and auxiliary value predictions from transitions
+                env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
+                env_aux_v_preds = th.cat([t["aux_v_pred"].unsqueeze(0) for t in env_transitions])
                 
-                print("Model attributes:", dir(agent.policy))
-
-                # Check if the attribute is properly initialized
-                if hasattr(agent.policy, 'aux_value_head'):
-                    print("aux_value_head exists in model")
-                else:
-                    print("aux_value_head missing from model")
-                # Fresh forward pass with gradients
                 with th.amp.autocast(device_type='cuda'):
-                    # Get policy distributions and auxiliary values
-                    pi_dist_seq, _, aux_vpred_seq, _, _ = agent.get_sequence_and_training_info(
-                        minerl_obs_list=obs_seq,
-                        initial_hidden_state=agent.policy.initial_state(1),
-                        stochastic=False,
-                        taken_actions_list=act_seq
-                    )
-                    # After getting the aux_vpred_seq:
-                    print(f"Raw aux_vpred_seq: {aux_vpred_seq}")
-                    print(f"Aux value range: {aux_vpred_seq.min().item()} to {aux_vpred_seq.max().item()}")
-                    print(f"Returns range: {returns.min().item()} to {returns.max().item()}")
-
-                    # Check for NaNs in the inputs
-                    if th.isnan(aux_vpred_seq).any():
-                        print("NaN detected in auxiliary value predictions")
-                    if th.isnan(returns).any():
-                        print("NaN detected in returns")
-                    
                     # Auxiliary value loss
-                    aux_value_loss = (th.clamp((aux_vpred_seq - returns), min=-100, max=100) ** 2).mean()
+                    aux_value_loss = ((env_aux_v_preds - env_returns) ** 2).mean()
                     
-                    # KL divergence loss (reuse from main phase)
+                    # KL divergence loss (identical to main phase)
                     kl_losses = []
-                    for t_idx, t in enumerate(env_transitions):
-                        # Get current policy distribution for this step
-                        cur_pd_t = {k: v[t_idx] for k, v in pi_dist_seq.items()}
-                        
-                        try:
-                            # Try computing KL loss with error handling
-                            kl_loss = compute_kl_loss(cur_pd_t, t["old_pd"])
-                            
-                            # Check for NaN and replace with a reasonable default if needed
-                            if th.isnan(kl_loss).any():
-                                print(f"Warning: NaN detected in KL loss, using default value")
-                                kl_loss = th.tensor(0.1, device="cuda")
-                                
-                            kl_losses.append(kl_loss)
-                        except Exception as e:
-                            print(f"Error in KL calculation: {e}")
-                            # Use a small default KL value
-                            kl_losses.append(th.tensor(0.1, device="cuda"))
-
-                    # Average losses with stability check
-                    if len(kl_losses) > 0:
-                        kl_loss = th.stack(kl_losses).mean()
-                    else:
-                        kl_loss = th.tensor(0.0, device="cuda")
-                                        
+                    for t in env_transitions:
+                        kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                        kl_losses.append(kl_loss)
+                    kl_loss = th.stack(kl_losses).mean()
+                    
                     # Total auxiliary phase loss
                     env_loss = AUX_VALUE_LOSS_COEF * aux_value_loss + LAMBDA_KL * kl_loss
                 
