@@ -590,7 +590,19 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 obs_seq = [t["obs"] for t in env_transitions]
                 act_seq = [t["action"] for t in env_transitions]
                 returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
-                
+                print("Auxiliary Value Head Parameters:")
+                for name, param in agent.policy.aux_value_head.named_parameters():
+                    print(f"  {name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+
+                # After getting the aux_vpred_seq:
+                print(f"Raw aux_vpred_seq: {aux_vpred_seq}")
+                print("Model attributes:", dir(agent.policy))
+
+                # Check if the attribute is properly initialized
+                if hasattr(agent.policy, 'aux_value_head'):
+                    print("aux_value_head exists in model")
+                else:
+                    print("aux_value_head missing from model")
                 # Fresh forward pass with gradients
                 with th.amp.autocast(device_type='cuda'):
                     # Get policy distributions and auxiliary values

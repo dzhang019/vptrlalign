@@ -321,26 +321,6 @@ class MinecraftAgentPolicy(nn.Module):
         """
         return self.pi_head.kl_divergence(pd1, pd2)
 
-    def get_output_for_observation(self, obs, state_in, first):
-        """
-        Return gradient-enabled outputs for given observation.
-
-        Use `get_logprob_of_action` to get log probability of action
-        with the given probability distribution.
-
-        Returns:
-          - probability distribution given observation
-          - value prediction for given observation
-          - auxiliary value prediction for given observation
-          - new state
-        """
-        # We need to add a fictitious time dimension everywhere
-        obs = tree_map(lambda x: x.unsqueeze(1), obs)
-        first = first.unsqueeze(1)
-
-        (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
-
-        return pd, self.value_head.denormalize(vpred)[:, 0], self.aux_value_head.denormalize(aux_vpred)[:, 0], state_out
     
     @th.no_grad()
     def act(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
