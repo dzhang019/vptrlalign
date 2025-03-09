@@ -492,7 +492,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 original_dists_by_rollout[id(rollout)] = (transitions, original_dists)
                 
                 # Clear memory
-                torch.cuda.empty_cache()
+                th.cuda.empty_cache()
             
             # Now do 2 sleep cycles
             for sleep_cycle in range(2):
@@ -541,8 +541,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         optimizer.zero_grad()
                         
                         # Extract returns and predictions for this chunk
-                        returns = torch.tensor([t["return"] for t in chunk_transitions], device="cuda")
-                        aux_vpreds = torch.cat([t["aux_v_pred"].unsqueeze(0) for t in chunk_transitions])
+                        returns = th.tensor([t["return"] for t in chunk_transitions], device="cuda")
+                        aux_vpreds = th.cat([t["aux_v_pred"].unsqueeze(0) for t in chunk_transitions])
                         
                         with autocast():
                             # Auxiliary value loss
@@ -566,7 +566,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                                     
                                     policy_distill_losses.append(pd_loss)
                                 
-                                policy_distill_loss = torch.stack(policy_distill_losses).mean()
+                                policy_distill_loss = th.stack(policy_distill_losses).mean()
                                 loss = 0.5 * aux_value_loss + 1.0 * policy_distill_loss
                                 
                                 total_policy_distill_loss += policy_distill_loss.item() * len(chunk_transitions)
@@ -579,7 +579,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         
                         # Apply gradients
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+                        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
                         scaler.step(optimizer)
                         scaler.update()
                         
@@ -588,7 +588,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                         total_transitions += len(chunk_transitions)
                         
                         # Clear memory
-                        torch.cuda.empty_cache()
+                        th.cuda.empty_cache()
                 
                 # Report stats
                 if total_transitions > 0:
@@ -618,7 +618,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             stored_rollouts = []
             
             # Final cleanup
-            torch.cuda.empty_cache()
+            th.cuda.empty_cache()
             
         else:
             # ===== POLICY PHASE =====
