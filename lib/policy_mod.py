@@ -463,7 +463,7 @@ class MinecraftAgentPolicy(nn.Module):
         # Remove batch dimension from policy distribution
         pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)     # [T, ...]
 
-        return pd_seq, vpred_seq, log_prob_seq, state_out
+        return pd_seq, vpred_seq, aux_vpred_seq, log_prob_seq, state_out
 
     @th.no_grad()
     def v(self, obs, first, state_in):

@@ -266,7 +266,7 @@ class MineRLAgent:
 
         # Return everything, including new_hidden_state
         return minerl_action, pi_dist, vpred, log_prob, new_hidden_state
-    
+    '''WORKING OLD
     def get_action_and_training_info(self, minerl_obs, hidden_state, stochastic=True, taken_action=None):
         """
         Single-step logic that wraps policy.act_train(...).
@@ -375,5 +375,108 @@ class MineRLAgent:
         )
 
         return pi_dist_seq, vpred_seq, log_prob_seq, final_hidden_state
+    '''
 
 
+    def get_action_and_training_info(self, minerl_obs, hidden_state, stochastic=True, taken_action=None):
+        """
+        Single-step logic that wraps policy.act_train(...).
+        You can call this for:
+        - Environment stepping: pass 'taken_action=None' to sample an action.
+        - Re-forward at train time: pass 'taken_action' for the forced action.
+
+        Args:
+        minerl_obs: the raw MineRL observation (dict with 'pov' etc.)
+        hidden_state: the Transformer/LSTM hidden state for the current step
+        stochastic: whether to sample (if no forced action)
+        taken_action: if not None, a *factored* MineRL action that we force
+                        for log_prob calculation.
+        Returns:
+        minerl_action: an action in MineRL environment format
+        pi_dist: the distribution (if return_pd was True)
+        vpred: predicted value (tensor)
+        aux_vpred: predicted auxiliary value (tensor)
+        log_prob: log-prob of the chosen or forced action
+        new_hidden_state: the updated hidden state after this step
+        """
+
+        # 1) Convert MineRL observation to agent's input
+        agent_input = self._env_obs_to_agent(minerl_obs)
+
+        # 2) Policy call. 
+        #    If 'taken_action' is not None, we must convert that to the model's format 
+        #    before passing it. But let's do that internally if needed:
+        forced_action_torch = None
+        if taken_action is not None:
+            # Use the existing _env_action_to_agent(...) to convert to Tensors:
+            forced_action_torch = self._env_action_to_agent(taken_action, to_torch=True)
+
+        # 3) Single-step forward pass
+        agent_action, new_hidden_state, result = self.policy.act_train(
+            obs=agent_input,
+            first=self._dummy_first,   # or pass a real 'first' if you track episode starts
+            state_in=hidden_state,
+            stochastic=stochastic,
+            taken_action=forced_action_torch,  # forced action if not None
+            return_pd=True
+        )
+
+        # 4) Convert the policy's action => MineRL env format
+        minerl_action = self._agent_action_to_env(agent_action)
+
+        log_prob = result["log_prob"]
+        vpred = result["vpred"]
+        aux_vpred = result["aux_vpred"]  # Get auxiliary value prediction
+        pi_dist = result.get("pd", None)
+
+        return minerl_action, pi_dist, vpred, aux_vpred, log_prob, new_hidden_state
+
+    def get_sequence_and_training_info(
+        self,
+        minerl_obs_list,        # List of T raw MineRL obs
+        initial_hidden_state,   # The RNN/transformer hidden state at step=0
+        stochastic=True,
+        taken_actions_list=None
+    ):
+        """
+        Multi-step logic for training:
+        - Takes a full list of T environment observations
+        - Optionally a list of forced actions (taken_actions_list) if you want
+        to compute log-prob for each step.
+        - Returns pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hidden_state
+        each of which is length T or shaped [T, ...].
+        """
+        initial_hidden_state = tree_map(lambda x: x.to(self.device), initial_hidden_state)
+        
+        # 1) Convert each MineRL observation to agent input & stack
+        agent_inputs_list = []
+        for minerl_obs in minerl_obs_list:
+            agent_input = self._env_obs_to_agent(minerl_obs)   # shape { "img": Tensor[1, C, H, W] }
+            agent_inputs_list.append(agent_input["img"])       # each is shape [1, C, H, W]
+
+        # Stack into shape [T, C, H, W] (removing the batch=1 dimension)
+        stacked_img = th.cat(agent_inputs_list, dim=0).to(self.device)  # shape [T, C, H, W]
+
+        # We now have a dict with a single "img" key for the entire sequence
+        stacked_obs = {"img": stacked_img}
+
+        # 2) If we have forced actions, convert them
+        forced_actions_torch = None
+        if taken_actions_list is not None:
+            forced_actions_list_torch = []
+            for taken_action in taken_actions_list:
+                # Convert to model's format
+                fa_torch = self._env_action_to_agent(taken_action, to_torch=True)
+                forced_actions_list_torch.append(fa_torch)
+            # We'll handle the shape inside act_train_sequence
+            forced_actions_torch = forced_actions_list_torch
+
+        # 3) Call the multi-step forward with auxiliary value head
+        pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hidden_state = self.policy.act_train_sequence(
+            stacked_obs,              # shape [T, ...]
+            initial_hidden_state,
+            forced_actions=forced_actions_torch,
+            stochastic=stochastic
+        )
+
+        return pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hidden_state
