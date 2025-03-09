@@ -17,7 +17,7 @@ from lib.tree_util import tree_map
 
 from lib.height import reward_function
 from lib.reward_structure_mod import custom_reward_function
-from lib.policy_mod import compute_kl_loss
+from lib.policy_mod import compute_kl_loss, compute_kl_loss_debug
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
@@ -510,6 +510,20 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                             
                             # Policy distillation loss (joint policy update in auxiliary phase)
                             policy_distill_losses = []
+                            if i == 0:  
+                                print(f"[DISTILL-DEBUG] Comparing transition distributions")
+                                # Check for exact tensor identity (not just value equality)
+                                for key in cur_pd:
+                                    if cur_pd[key] is orig_pd[key]:  # Check if they're the same tensor object
+                                        print(f"[DISTILL-ERROR] Key {key}: Current and original policy are THE SAME TENSOR!")
+                                    else:
+                                        # Print a few values to see if they differ
+                                        if cur_pd[key].dim() > 0 and cur_pd[key].shape[0] > 0:
+                                            max_diff = (cur_pd[key] - orig_pd[key]).abs().max().item()
+                                            print(f"[DISTILL-DEBUG] Max diff for {key}: {max_diff:.8f}")
+                                pd_loss = compute_kl_loss_debug(cur_pd, orig_pd, debug_tag=f"DISTILL-{aux_iter}")
+                            else:
+                                pd_loss = compute_kl_loss(cur_pd, orig_pd)
                             for i, t in enumerate(transitions):
                                 cur_pd = t["cur_pd"]
                                 orig_pd = original_policy_dists[i]

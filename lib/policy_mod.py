@@ -34,6 +34,53 @@ def compute_kl_loss(current_logits_dict, old_logits_dict):
         kl_total += kl_loss
         num_heads +=1
     return kl_total / num_heads
+def compute_kl_loss_debug(current_logits_dict, old_logits_dict, debug_tag=""):
+    kl_total = 0.0
+    num_heads = 0
+    head_kls = {}
+    
+    print(f"[KL-DEBUG {debug_tag}] Keys in current_logits_dict: {list(current_logits_dict.keys())}")
+    
+    for key in current_logits_dict.keys():
+        current_logits = current_logits_dict[key]
+        pretrained_logits = old_logits_dict[key]
+        
+        # Extract and print some sample logits for debugging
+        if current_logits.shape[0] > 0 and current_logits.ndimension() > 1:
+            print(f"[KL-DEBUG {debug_tag}] Key: {key}")
+            if key == "camera":  # Special handling for camera due to different shape
+                cur_sample = current_logits[0, :5].detach().cpu().numpy()
+                old_sample = pretrained_logits[0, :5].detach().cpu().numpy()
+            else:
+                cur_sample = current_logits[0, :5].detach().cpu().numpy()
+                old_sample = pretrained_logits[0, :5].detach().cpu().numpy()
+                
+            print(f"[KL-DEBUG {debug_tag}] Current sample: {cur_sample}")
+            print(f"[KL-DEBUG {debug_tag}] Old sample: {old_sample}")
+            print(f"[KL-DEBUG {debug_tag}] Diff: {cur_sample - old_sample}")
+            print(f"[KL-DEBUG {debug_tag}] Max abs diff: {np.abs(cur_sample - old_sample).max()}")
+        
+        # Check for very similar distributions
+        if th.allclose(current_logits, pretrained_logits, rtol=1e-4, atol=1e-4):
+            print(f"[KL-DEBUG {debug_tag}] Warning: Current and old logits for {key} are very similar!")
+        
+        # Calculate KL divergence - using your exact implementation
+        kl_loss = F.kl_div(
+            F.log_softmax(current_logits, dim=-1),
+            F.softmax(pretrained_logits, dim=-1),
+            reduction='batchmean'
+        )
+        
+        head_kls[key] = kl_loss.item()
+        kl_total += kl_loss
+        num_heads += 1
+    
+    avg_kl = kl_total / max(1, num_heads)
+    
+    print(f"[KL-DEBUG {debug_tag}] KL per head: {head_kls}")
+    print(f"[KL-DEBUG {debug_tag}] Average KL: {avg_kl.item()}")
+    
+    return kl_total / max(1, num_heads)
 
 class ImgPreprocessing(nn.Module):
     """Normalize incoming images.
