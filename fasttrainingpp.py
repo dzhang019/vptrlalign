@@ -819,3 +819,35 @@ def train_rl_mp(
         # Save weights
         print(f"Saving weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--in-model", required=True, type=str)
+    parser.add_argument("--in-weights", required=True, type=str)
+    parser.add_argument("--out-weights", required=True, type=str)
+    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
+    parser.add_argument("--num-iterations", required=False, type=int, default=10)
+    parser.add_argument("--rollout-steps", required=False, type=int, default=40)
+    parser.add_argument("--num-envs", required=False, type=int, default=4)
+    parser.add_argument("--queue-size", required=False, type=int, default=3,
+                       help="Size of the queue between environment and training threads")
+
+    args = parser.parse_args()
+    weights = th.load(args.in_weights, map_location="cpu")
+    print("Weight keys:", weights.keys())
+
+    # Look for any keys that might suggest an auxiliary value head
+    for key in weights.keys():
+        if "auxiliary" in key or "aux" in key:
+            print(f"Possible auxiliary head key: {key}")
+    train_rl_mp(
+        in_model=args.in_model,
+        in_weights=args.in_weights,
+        out_weights=args.out_weights,
+        out_episodes=args.out_episodes,
+        num_iterations=args.num_iterations,
+        rollout_steps=args.rollout_steps,
+        num_envs=args.num_envs,
+        queue_size=args.queue_size
+    )
+    
