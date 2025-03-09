@@ -516,7 +516,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     KL_DECAY = 0.9995
     
     # PPG specific hyperparameters
-    PPG_N_ITERATIONS = 32     # Main phase iterations before auxiliary phase
+    PPG_N_ITERATIONS = 6     # Main phase iterations before auxiliary phase
     PPG_N_AUX_EPOCHS = 6      # Auxiliary phase optimization epochs
     
     # Setup optimizer
