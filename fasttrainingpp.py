@@ -46,6 +46,39 @@ class RolloutQueue:
         return self.queue.qsize()
 
 
+# Phase coordinator for synchronizing policy and auxiliary phases
+class PhaseCoordinator:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.is_auxiliary_phase = False
+        self.auxiliary_phase_complete = threading.Event()
+        self.rollout_buffer = []
+    
+    def start_auxiliary_phase(self):
+        with self.lock:
+            self.is_auxiliary_phase = True
+            self.auxiliary_phase_complete.clear()
+    
+    def end_auxiliary_phase(self):
+        with self.lock:
+            self.is_auxiliary_phase = False
+            self.auxiliary_phase_complete.set()
+    
+    def in_auxiliary_phase(self):
+        with self.lock:
+            return self.is_auxiliary_phase
+    
+    def buffer_rollout(self, rollout):
+        with self.lock:
+            self.rollout_buffer.append(rollout)
+    
+    def get_buffered_rollouts(self):
+        with self.lock:
+            rollouts = self.rollout_buffer
+            self.rollout_buffer = []
+            return rollouts
+
+
 # Function run in each environment process
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     # Create environment
@@ -112,7 +145,8 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
 
 
 # Thread for coordinating environments and collecting rollouts
-def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, out_episodes, stop_flag, num_envs):
+def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
+                       out_episodes, stop_flag, num_envs, phase_coordinator):
     # Initialize tracking variables
     obs_list = [None] * num_envs
     done_list = [False] * num_envs
@@ -127,6 +161,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     
     iteration = 0
     while not stop_flag[0]:
+        # Check if we're in auxiliary phase - if so, wait
+        if phase_coordinator.in_auxiliary_phase():
+            print("[Environment Thread] Pausing collection during auxiliary phase")
+            phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
+            if phase_coordinator.in_auxiliary_phase():
+                continue
+        
         iteration += 1
         start_time = time.time()
         
@@ -145,17 +186,27 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         
         # Collect rollouts
         for step in range(rollout_steps):
+            # Check if auxiliary phase started during collection
+            if phase_coordinator.in_auxiliary_phase():
+                print(f"[Environment Thread] Auxiliary phase started during collection, step {step}/{rollout_steps}")
+                break
+                
             # For each environment, generate action and send it
             for env_id in range(num_envs):
                 if obs_list[env_id] is not None:
                     # Generate action using agent
                     with th.no_grad():
-                        minerl_action, _, _, _, _, new_hid = agent.get_action_and_training_info(
+                        # Handle different return signatures
+                        action_info = agent.get_action_and_training_info(
                             minerl_obs=obs_list[env_id],
                             hidden_state=hidden_states[env_id],
                             stochastic=True,
                             taken_action=None
                         )
+                        
+                        # Extract new hidden state (last element of return tuple)
+                        minerl_action = action_info[0]
+                        new_hid = action_info[-1]
                     
                     # Update hidden state
                     hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
@@ -205,18 +256,27 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     print(f"[Environment Thread] Timeout waiting for results in step {step}")
                     break
         
-        # Send collected rollouts to training thread
-        end_time = time.time()
-        duration = end_time - start_time
-        
-        # Count total transitions
-        total_transitions = sum(len(r["obs"]) for r in rollouts)
-        
-        print(f"[Environment Thread] Iteration {iteration} collected {total_transitions} transitions "
-              f"across {num_envs} envs in {duration:.3f}s")
-        
-        rollout_queue.put(rollouts)
+        # Check if we're in auxiliary phase again before putting rollouts in queue
+        # This handles the case where auxiliary phase begins during collection
+        if not phase_coordinator.in_auxiliary_phase():
+            # Send collected rollouts to training thread
+            end_time = time.time()
+            duration = end_time - start_time
+            
+            # Count total transitions
+            total_transitions = sum(len(r["obs"]) for r in rollouts)
+            
+            print(f"[Environment Thread] Iteration {iteration} collected {total_transitions} transitions "
+                f"across {num_envs} envs in {duration:.3f}s")
+            
+            rollout_queue.put(rollouts)
+        else:
+            # Buffer the rollouts for later use
+            print(f"[Environment Thread] Iteration {iteration} - buffering {sum(len(r['obs']) for r in rollouts)} transitions")
+            phase_coordinator.buffer_rollout(rollouts)
 
+
+# Process rollouts from a single environment
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     """
     Process a rollout from a single environment into a series of transitions
@@ -327,7 +387,9 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
 
     return transitions
 
-def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations):
+
+# Training thread that handles both policy and auxiliary phases
+def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator):
     """
     Training thread that handles both the policy gradient phase and the auxiliary phase (PPG).
     
@@ -337,6 +399,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         rollout_queue: Queue for receiving rollouts from environment thread
         stop_flag: Flag for signaling termination
         num_iterations: Number of iterations to train for
+        phase_coordinator: Coordinator for synchronizing phases between threads
     """
     # Hyperparameters
     LEARNING_RATE = 2e-5
@@ -384,6 +447,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         
         if do_aux_phase:
             # ===== AUXILIARY PHASE =====
+            # Signal start of auxiliary phase
+            phase_coordinator.start_auxiliary_phase()
             print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
             
             # Flatten the stored rollouts for the auxiliary phase
@@ -396,6 +461,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             # Skip if no valid rollouts
             if len(flat_rollouts) == 0:
                 print("[Training Thread] No valid rollouts for auxiliary phase, skipping")
+                phase_coordinator.end_auxiliary_phase()
                 pi_update_counter = 0
                 stored_rollouts = []
                 continue
@@ -485,12 +551,23 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                           f"AuxValueLoss={avg_aux_value_loss:.4f}, "
                           f"PolicyDistillLoss={avg_policy_distill_loss:.4f}")
             
+            # End auxiliary phase and signal environment thread
+            phase_coordinator.end_auxiliary_phase()
+            print("[Training Thread] Auxiliary phase complete, resuming experience collection")
+            
+            # Check if environment thread buffered any rollouts during aux phase
+            buffered_rollouts = phase_coordinator.get_buffered_rollouts()
+            if buffered_rollouts:
+                print(f"[Training Thread] Processing {len(buffered_rollouts)} buffered rollouts from auxiliary phase")
+                for rollout in buffered_rollouts:
+                    rollout_queue.put(rollout)
+            
             # Reset tracking variables after auxiliary phase
             pi_update_counter = 0
             stored_rollouts = []
             
         else:
-            # ===== POLICY GRADIENT PHASE =====
+            # ===== POLICY PHASE =====
             pi_update_counter += 1
             
             print(f"[Training Thread] Policy phase {pi_update_counter}/{PPG_N_PI_UPDATES} - "
@@ -503,22 +580,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             
             # Store rollouts for PPG auxiliary phase if enabled
             if PPG_ENABLED and has_aux_head:
-                # Deep copy to avoid modifications affecting stored rollouts
-                stored_copy = []
-                for env_rollout in rollouts:
-                    if len(env_rollout["obs"]) > 0:
-                        # Create a copy with only the necessary data
-                        copy_rollout = {
-                            "obs": env_rollout["obs"].copy(),
-                            "actions": env_rollout["actions"].copy(),
-                            "rewards": env_rollout["rewards"].copy(),
-                            "dones": env_rollout["dones"].copy(),
-                            "hidden_states": [hs for hs in env_rollout["hidden_states"]],
-                            "next_obs": env_rollout["next_obs"].copy()
-                        }
-                        stored_copy.append(copy_rollout)
-                
-                stored_rollouts.append(stored_copy)
+                # Make a copy to avoid modifications affecting stored rollouts
+                stored_rollouts.append(rollouts)
                 # Limit stored rollouts to save memory
                 if len(stored_rollouts) > 2:
                     stored_rollouts = stored_rollouts[-2:]
@@ -663,6 +726,9 @@ def train_rl_mp(
     )
     pretrained_policy.load_weights(in_weights)
     
+    # Create phase coordinator
+    phase_coordinator = PhaseCoordinator()
+    
     # Create multiprocessing shared objects
     stop_flag = mp.Value('b', False)
     action_queues = [Queue() for _ in range(num_envs)]
@@ -695,13 +761,21 @@ def train_rl_mp(
             rollout_queue, 
             out_episodes, 
             thread_stop,
-            num_envs
+            num_envs,
+            phase_coordinator  # Add phase coordinator
         )
     )
     
     train_thread = threading.Thread(
         target=training_thread,
-        args=(agent, pretrained_policy, rollout_queue, thread_stop, num_iterations)
+        args=(
+            agent, 
+            pretrained_policy, 
+            rollout_queue, 
+            thread_stop, 
+            num_iterations,
+            phase_coordinator  # Add phase coordinator
+        )
     )
     
     print("Starting threads...")
@@ -745,35 +819,3 @@ def train_rl_mp(
         # Save weights
         print(f"Saving weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("--in-model", required=True, type=str)
-    parser.add_argument("--in-weights", required=True, type=str)
-    parser.add_argument("--out-weights", required=True, type=str)
-    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
-    parser.add_argument("--num-iterations", required=False, type=int, default=10)
-    parser.add_argument("--rollout-steps", required=False, type=int, default=40)
-    parser.add_argument("--num-envs", required=False, type=int, default=4)
-    parser.add_argument("--queue-size", required=False, type=int, default=3,
-                       help="Size of the queue between environment and training threads")
-
-    args = parser.parse_args()
-    weights = th.load(args.in_weights, map_location="cpu")
-    print("Weight keys:", weights.keys())
-
-    # Look for any keys that might suggest an auxiliary value head
-    for key in weights.keys():
-        if "auxiliary" in key or "aux" in key:
-            print(f"Possible auxiliary head key: {key}")
-    train_rl_mp(
-        in_model=args.in_model,
-        in_weights=args.in_weights,
-        out_weights=args.out_weights,
-        out_episodes=args.out_episodes,
-        num_iterations=args.num_iterations,
-        rollout_steps=args.rollout_steps,
-        num_envs=args.num_envs,
-        queue_size=args.queue_size
-    )
