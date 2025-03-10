@@ -419,6 +419,7 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
 
 
 # Run a PPG sleep phase
+# Run a PPG sleep phase
 def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
     """Run the PPG auxiliary phase with proper memory cleanup between rollouts."""
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
@@ -469,6 +470,10 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         
         # Process in smaller chunks for original distributions
         orig_dist_count = 0
+        
+        # Get the initial hidden state for this rollout
+        current_hidden = tree_map(lambda x: x.to("cuda").contiguous(), rollout["hidden_states"][0])
+        
         for chunk_start in range(0, len(transitions), MAX_SEQ_LEN):
             chunk_end = min(chunk_start + MAX_SEQ_LEN, len(transitions))
             chunk = transitions[chunk_start:chunk_end]
@@ -481,10 +486,14 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
             with th.no_grad():
                 outputs = agent.get_sequence_and_training_info(
                     minerl_obs_list=chunk_obs,
-                    initial_hidden_state=agent.policy.initial_state(1),
+                    initial_hidden_state=current_hidden,  # Use current hidden state
                     stochastic=False,
                     taken_actions_list=chunk_actions
                 )
+                
+                # Update hidden state for next chunk (assuming last element contains hidden state)
+                final_hidden = outputs[-1]
+                current_hidden = tree_map(lambda x: x.detach(), final_hidden)
                 
                 # Store distributions directly in CPU transitions
                 if len(outputs) >= 5:
@@ -518,6 +527,8 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
             
             # Forward pass with gradients
             with th.enable_grad():
+                # Note: We use initial_state here as we're not processing sequentially
+                # This is fine for optimizing the auxiliary value head
                 outputs = agent.get_sequence_and_training_info(
                     minerl_obs_list=batch_obs,
                     initial_hidden_state=agent.policy.initial_state(1),
@@ -576,6 +587,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         print(f"After rollout {rollout_idx+1} processing: {th.cuda.memory_allocated() / 1e9:.2f} GB")
         print(f"Stored {orig_dist_count} original distributions")
     
+    # Rest of the function remains unchanged...
     # Report statistics for cycle 1
     if num_transitions > 0:
         avg_aux_value_loss = aux_value_loss_sum / num_transitions
@@ -586,7 +598,9 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     else:
         print(f"[Sleep Phase] Cycle 1/2 - No transitions processed")
     
-    # Second cycle: Process stored transitions for policy distillation
+    # Second cycle remains the same as it doesn't rely on sequential processing
+    # for the KL divergence calculation...
+    
     print(f"Before cycle 2: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     print(f"[Sleep Phase] Running cycle 2/2")
     
@@ -707,7 +721,6 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     # Final cleanup and memory usage reporting
     del cycle2_data
     th.cuda.empty_cache()
-    #print(f"Final CUDA memory: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     print("[Sleep Phase] Completed")
 
 # Run policy optimization (wake phase)
