@@ -424,7 +424,12 @@ class MinecraftAgentPolicy(nn.Module):
     def act_train_sequence(self, obs_sequence, hidden_state, forced_actions=None, stochastic=True):
         seq_img = obs_sequence["img"].unsqueeze(0)  # [1, T, C, H, W]
         T = seq_img.shape[1]
-        print(f"Processing sequence of length {T} with hidden state shapes {[x.shape for x in hidden_state]}")
+        print(f"Processing sequence of length {T}")
+        if isinstance(hidden_state, tuple):
+            key_state, value_state = hidden_state
+            print(f"Hidden state: Key shape={key_state.shape}, Value shape={value_state.shape}")
+        else:
+            print(f"Hidden state type: {type(hidden_state)}")
         first_mask = th.zeros(T, dtype=th.bool, device=seq_img.device)
         first_mask[0] = True
         first_mask = first_mask.unsqueeze(0)  # [1, T]
