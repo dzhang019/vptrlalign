@@ -430,7 +430,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     print(f"[Sleep Phase] Running with {len(recent_rollouts)} rollouts")
     
     # Maximum sequence length to process at once
-    MAX_SEQ_LEN = 128  # Match your transformer's context length
+    MAX_SEQ_LEN = 64  # Use half your transformer's context length to be safe
     
     # Process two sleep cycles
     for sleep_cycle in range(2):
@@ -455,6 +455,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
             
             # Store original policy distributions in first cycle
             if sleep_cycle == 0:
+                orig_dist_count = 0  # Debug counter
                 # Process in smaller chunks that fit transformer context
                 for chunk_start in range(0, len(transitions), MAX_SEQ_LEN):
                     chunk_end = min(chunk_start + MAX_SEQ_LEN, len(transitions))
@@ -478,6 +479,9 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                             pi_dist_seq = outputs[0]
                             for i, t in enumerate(chunk):
                                 t["orig_pi"] = {k: v[i].clone().detach() for k, v in pi_dist_seq.items()}
+                                orig_dist_count += 1
+                
+                print(f"[Sleep Phase] Stored original distributions for {orig_dist_count}/{len(transitions)} transitions")
             
             # Process optimization in batches that respect context length
             batch_size = min(16, MAX_SEQ_LEN)  # Batch size shouldn't exceed max sequence length
@@ -520,21 +524,52 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                         aux_value_loss = ((aux_values - batch_returns) ** 2).mean()
                         
                         # Policy distillation in second cycle
-                        if sleep_cycle == 1 and all("orig_pi" in t for t in batch):
-                            policy_distill_losses = []
-                            for i, t in enumerate(batch):
-                                orig_pi = t["orig_pi"]
-                                curr_pi_i = {k: v[i] for k, v in curr_pi.items()}
-                                
-                                kl_loss = compute_kl_loss(curr_pi_i, orig_pi)
-                                policy_distill_losses.append(kl_loss)
+                        if sleep_cycle == 1:
+                            # Debug: Check how many transitions have original distributions
+                            orig_pi_count = sum(1 for t in batch if "orig_pi" in t)
+                            print(f"[Sleep Phase] Found orig_pi in {orig_pi_count}/{len(batch)} transitions")
                             
-                            if policy_distill_losses:
-                                policy_distill_loss = th.stack(policy_distill_losses).mean()
-                                loss = aux_value_loss + beta_clone * policy_distill_loss
-                                policy_distill_loss_val = policy_distill_loss.item()
+                            if orig_pi_count > 0:
+                                policy_distill_losses = []
+                                
+                                for i, t in enumerate(batch):
+                                    if "orig_pi" in t:
+                                        orig_pi = t["orig_pi"]
+                                        curr_pi_i = {k: v[i] for k, v in curr_pi.items()}
+                                        
+                                        # Print sample KL values for debugging
+                                        if i == 0:  # Just print for first item
+                                            print(f"[Sleep Phase] Sample values:")
+                                            for k in curr_pi_i.keys():
+                                                print(f"  Key: {k}, curr shape: {curr_pi_i[k].shape}, orig shape: {orig_pi[k].shape}")
+                                                if k == "buttons":  # Example key
+                                                    print(f"  curr sample: {curr_pi_i[k][0:5].cpu().detach().numpy()}")
+                                                    print(f"  orig sample: {orig_pi[k][0:5].cpu().detach().numpy()}")
+                                        
+                                        kl_loss = compute_kl_loss(curr_pi_i, orig_pi)
+                                        
+                                        # Debug: Print individual KL loss values
+                                        if i % 8 == 0:  # Print every 8th for brevity
+                                            print(f"[Sleep Phase] KL loss for transition {i}: {kl_loss.item()}")
+                                            
+                                        policy_distill_losses.append(kl_loss)
+                                
+                                if policy_distill_losses:
+                                    policy_distill_loss = th.stack(policy_distill_losses).mean()
+                                    
+                                    # Increase beta_clone if KL is too small
+                                    actual_beta = beta_clone * 5.0  # Increase weight for policy distillation
+                                    
+                                    loss = aux_value_loss + actual_beta * policy_distill_loss
+                                    policy_distill_loss_val = policy_distill_loss.item()
+                                    
+                                    print(f"[Sleep Phase] Batch policy distill loss: {policy_distill_loss_val}")
+                                else:
+                                    # Fallback if we couldn't compute distillation loss
+                                    loss = aux_value_loss
+                                    policy_distill_loss_val = 0.0
                             else:
-                                # Fallback if we couldn't compute distillation loss
+                                print("[Sleep Phase] Warning: No original policy distributions found for distillation")
                                 loss = aux_value_loss
                                 policy_distill_loss_val = 0.0
                         else:
