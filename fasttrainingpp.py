@@ -419,278 +419,242 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
 
 
 # Run a PPG sleep phase
-def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
-    """Run the PPG auxiliary phase with proper handling of transformer context limits."""
-    # Check if agent has auxiliary value head
+def run_sleep_phase(
+    agent,
+    recent_rollouts,
+    optimizer,
+    scaler,
+    max_grad_norm=1.0,
+    beta_clone=1.0,
+    max_seq_len=64,
+    batch_size=16,
+):
+    """
+    Run PPG's 'sleep' phase with:
+      - Better chunking of forward passes
+      - Storing old distributions on CPU
+    """
+    # Check if we actually have an auxiliary value head
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if not has_aux_head:
-        print("[Sleep Phase] Warning: Agent does not have auxiliary value head, skipping sleep phase")
+        print("[Sleep Phase] Skipping — no auxiliary value head detected.")
         return
-    
-    print(f"[Sleep Phase] Running with {len(recent_rollouts)} rollouts")
-    
-    # Maximum sequence length to process at once
-    MAX_SEQ_LEN = 64  # Use half your transformer's context length to be safe
-    BATCH_SIZE = 16   # Small batch size to control memory usage
-    
-    # Store processed transitions across cycles
-    all_processed_transitions = []
-    
-    # First cycle: Process rollouts, compute auxiliary value loss, and store original distributions
-    print(f"[Sleep Phase] Running sleep cycle 1/2")
-    
-    # Track metrics for cycle 1
+
+    # -------------
+    # Cycle 1: We gather rollouts, store their 'orig_pi' on CPU, and optionally do a pass to train the aux value head
+    # -------------
+    print(f"\n[Sleep Phase] Starting Cycle 1/2 on {len(recent_rollouts)} rollouts ...")
+
     aux_value_loss_sum = 0.0
-    num_transitions = 0
-    
-    # Process each rollout
+    n_transitions_cycle1 = 0
+
+    # We'll hold all transitions here, after we embed them with 'orig_pi'
+    all_processed_transitions = []
+
     for rollout_idx, rollout in enumerate(recent_rollouts):
         if len(rollout["obs"]) == 0:
             continue
-            
-        print(f"[Sleep Phase] Processing rollout {rollout_idx+1}/{len(recent_rollouts)} in cycle 1/2")
-        
-        # Process rollout to get transitions with returns calculation
+
+        # 1) Convert the rollout to transitions with returns. This calls your 'train_unroll', which
+        #    calculates advantages, returns, etc. For each transition t, we do NOT yet store any old distributions,
+        #    because we want them from the *current model*'s forward pass:
         transitions = train_unroll(agent, agent, rollout)
-        if len(transitions) == 0:
+        if not transitions:
             continue
-        
-        # Store original policy distributions
-        orig_dist_count = 0
-        
-        # Process in smaller chunks that fit transformer context
-        for chunk_start in range(0, len(transitions), MAX_SEQ_LEN):
-            chunk_end = min(chunk_start + MAX_SEQ_LEN, len(transitions))
-            chunk = transitions[chunk_start:chunk_end]
-            
-            # Get obs and actions for this chunk
+
+        # 2) For each chunk of length <= max_seq_len, get the *current model* distributions and store them on CPU
+        #    We call them "orig_pi" so that cycle 2 can treat them as the distillation target
+        for start in range(0, len(transitions), max_seq_len):
+            end = min(start + max_seq_len, len(transitions))
+            chunk = transitions[start:end]
+            # Observations / actions in this chunk
             chunk_obs = [t["obs"] for t in chunk]
             chunk_actions = [t["action"] for t in chunk]
-            
-            # Store original policy distributions
+
+            # We'll do a forward pass with the model to get 'orig_pi'
             with th.no_grad():
-                outputs = agent.get_sequence_and_training_info(
+                seq_outs = agent.get_sequence_and_training_info(
                     minerl_obs_list=chunk_obs,
-                    initial_hidden_state=agent.policy.initial_state(1),
+                    initial_hidden_state=agent.policy.initial_state(batch_size=1),
                     stochastic=False,
                     taken_actions_list=chunk_actions
                 )
-                
-                # Save distributions
-                if len(outputs) >= 5:
-                    pi_dist_seq = outputs[0]
-                    for i, t in enumerate(chunk):
-                        t["orig_pi"] = {k: v[i].clone().detach() for k, v in pi_dist_seq.items()}
-                        orig_dist_count += 1
-        
-        print(f"[Sleep Phase] Stored original distributions for {orig_dist_count}/{len(transitions)} transitions")
-        
-        # Auxiliary value head optimization for cycle 1
-        for batch_start in range(0, len(transitions), BATCH_SIZE):
-            # Clear CUDA cache
-            th.cuda.empty_cache()
-            
-            batch_end = min(batch_start + BATCH_SIZE, len(transitions))
+                # Typically returns something like (pd_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hidden_state)
+                if len(seq_outs) >= 5:
+                    pi_dist_seq, _, aux_vpred_seq, _, _ = seq_outs
+                else:
+                    pi_dist_seq, _, _, _ = seq_outs
+                    aux_vpred_seq = None  # If no separate aux head in get_sequence_and_training_info
+
+            # Store these distributions on CPU
+            # Each pi_dist_seq entry is shape [T, ...], so we match them by index
+            for i, t in enumerate(chunk):
+                # 'orig_pi' is a dict of {key: CPU_tensor_slice} at this step
+                # Move slice to CPU:
+                t["orig_pi"] = {
+                    k: v[i].clone().detach().cpu() for k, v in pi_dist_seq.items()
+                }
+                # Optionally store the *aux vpred* from cycle 1 on the transition if you want
+                # but not usually necessary. 
+                # We'll just keep 'aux_vpred_seq' for cycle 1 updates.
+
+        # 3) (Optional) Do an auxiliary value update in cycle 1
+        #    so that the agent's aux value head starts to learn from these returns
+        #    This can be done in small batches:
+        for batch_start in range(0, len(transitions), batch_size):
+            batch_end = min(batch_start + batch_size, len(transitions))
             batch = transitions[batch_start:batch_end]
-            
-            # Get returns and observations for this batch
-            batch_returns = th.tensor([t["return"] for t in batch], device="cuda")
-            batch_obs = [t["obs"] for t in batch]
-            batch_actions = [t["action"] for t in batch]
-            
+            if not batch:
+                continue
+
+            # Prepare returns on GPU
+            returns = th.tensor([t["return"] for t in batch], device="cuda")
+            obs_list = [t["obs"] for t in batch]
+            actions_list = [t["action"] for t in batch]
+
             # Zero gradients
-            optimizer.zero_grad()
-            
-            # Forward pass with gradients
+            optimizer.zero_grad(set_to_none=True)
+
+            # Forward pass
             with th.enable_grad():
-                outputs = agent.get_sequence_and_training_info(
-                    minerl_obs_list=batch_obs,
+                out = agent.get_sequence_and_training_info(
+                    minerl_obs_list=obs_list,
                     initial_hidden_state=agent.policy.initial_state(1),
                     stochastic=False,
-                    taken_actions_list=batch_actions
+                    taken_actions_list=actions_list
                 )
-                
-                # Get auxiliary values
-                if len(outputs) >= 5:
-                    _, _, aux_values, _, _ = outputs
+                if len(out) >= 5:
+                    # (pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hidden)
+                    _, _, aux_vpred_seq, _, _ = out
                 else:
-                    print("[Sleep Phase] Error: No auxiliary value predictions")
+                    # fallback in case your method returns 4 items
+                    print("[Sleep Phase] No aux_vpred in cycle 1 forward pass, skipping.")
                     continue
-            
-            try:
-                # Compute auxiliary value loss
-                with th.autocast(device_type='cuda'):
-                    aux_value_loss = ((aux_values - batch_returns) ** 2).mean()
-                    loss = aux_value_loss
-                
-                # Backward and optimize
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
-                
-                # Update statistics
-                aux_value_loss_sum += aux_value_loss.item() * len(batch)
-                num_transitions += len(batch)
-                
-            except Exception as e:
-                print(f"[Sleep Phase] Error during cycle 1 optimization: {e}")
-                import traceback
-                traceback.print_exc()
-                # Reset gradients
-                optimizer.zero_grad()
-            
-            # Clear memory
-            th.cuda.empty_cache()
-        
-        # Add these processed transitions to our stored collection
-        all_processed_transitions.extend(transitions)
-    
-    # Report statistics for cycle 1
-    if num_transitions > 0:
-        avg_aux_value_loss = aux_value_loss_sum / num_transitions
-        print(f"[Sleep Phase] Cycle 1/2 completed - "
-              f"Transitions: {num_transitions}, "
-              f"AvgAuxValueLoss: {avg_aux_value_loss:.6f}, "
-              f"AvgPolicyDistillLoss: 0.000000")
-    else:
-        print(f"[Sleep Phase] Cycle 1/2 - No transitions processed")
-    
-    # Second cycle: Process stored transitions for combined auxiliary value and policy distillation
-    print(f"[Sleep Phase] Running sleep cycle 2/2")
-    
-    # Track metrics for cycle 2
-    aux_value_loss_sum = 0.0
-    policy_distill_loss_sum = 0.0
-    num_transitions = 0
-    
-    # Process stored transitions in batches
-    for batch_start in range(0, len(all_processed_transitions), BATCH_SIZE):
-        # Clear CUDA cache
-        th.cuda.empty_cache()
-        
-        batch_end = min(batch_start + BATCH_SIZE, len(all_processed_transitions))
-        batch = all_processed_transitions[batch_start:batch_end]
-        
-        # Count transitions with original distributions
-        orig_pi_count = sum(1 for t in batch if "orig_pi" in t)
-        print(f"[Sleep Phase] Found orig_pi in {orig_pi_count}/{len(batch)} transitions")
-        
-        if orig_pi_count == 0:
-            # Skip if no original distributions
-            continue
-        
-        # Get returns and observations for this batch
-        batch_returns = th.tensor([t["return"] for t in batch], device="cuda")
-        batch_obs = [t["obs"] for t in batch]
-        batch_actions = [t["action"] for t in batch]
-        
-        # Zero gradients
-        optimizer.zero_grad()
-        
-        # Forward pass with gradients
-        with th.enable_grad():
-            outputs = agent.get_sequence_and_training_info(
-                minerl_obs_list=batch_obs,
-                initial_hidden_state=agent.policy.initial_state(1),
-                stochastic=False,
-                taken_actions_list=batch_actions
-            )
-            
-            # Get auxiliary values and current policy distributions
-            if len(outputs) >= 5:
-                curr_pi, _, aux_values, _, _ = outputs
-            else:
-                print("[Sleep Phase] Error: No auxiliary value predictions")
-                continue
-        
-        try:
-            # Compute losses - both auxiliary value and policy distillation
+
+            # Compute auxiliary value loss
             with th.autocast(device_type='cuda'):
-                # Auxiliary value loss
-                aux_value_loss = ((aux_values - batch_returns) ** 2).mean()
-                
-                # Policy distillation loss
-                policy_distill_losses = []
-                
-                for i, t in enumerate(batch):
-                    if "orig_pi" in t:
-                        # Get original distribution from stored transition
-                        orig_pi = t["orig_pi"]
-                        
-                        # Move to GPU
-                        orig_pi = {k: v.to("cuda") for k, v in orig_pi.items()}
-                        
-                        # Get current distribution
-                        curr_pi_i = {k: v[i] for k, v in curr_pi.items()}
-                        
-                        # Print sample values for first transition
-                        if i == 0:
-                            print(f"[Sleep Phase] Sample current vs original values:")
-                            for k in curr_pi_i.keys():
-                                if k == "buttons":  # Just sample the first key
-                                    print(f"  Key: {k}, curr: {curr_pi_i[k][0:2].detach().cpu().numpy()}")
-                                    print(f"  Key: {k}, orig: {orig_pi[k][0:2].cpu().numpy()}")
-                        
-                        # Compute KL divergence
-                        kl_loss = compute_kl_loss(curr_pi_i, orig_pi)
-                        policy_distill_losses.append(kl_loss)
-                
-                if policy_distill_losses:
-                    # Combine all KL losses
-                    policy_distill_loss = th.stack(policy_distill_losses).mean()
-                    
-                    # Print individual KL loss
-                    print(f"[Sleep Phase] Policy distillation loss: {policy_distill_loss.item()}")
-                    
-                    # Combine with auxiliary value loss
-                    # Use higher weight for policy distillation to make it more visible
-                    actual_beta = beta_clone * 5.0
-                    loss = aux_value_loss + actual_beta * policy_distill_loss
-                    policy_distill_loss_val = policy_distill_loss.item()
-                else:
-                    # Fallback to just auxiliary value loss
-                    loss = aux_value_loss
-                    policy_distill_loss_val = 0.0
-            
-            # Backward and optimize
-            scaler.scale(loss).backward()
+                aux_v_loss = ((aux_vpred_seq - returns)**2).mean()
+
+            # Backprop / optimize
+            scaler.scale(aux_v_loss).backward()
             scaler.unscale_(optimizer)
             th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
-            
-            # Update statistics
-            aux_value_loss_sum += aux_value_loss.item() * len(batch)
-            policy_distill_loss_sum += policy_distill_loss_val * orig_pi_count
-            num_transitions += len(batch)
-            
-        except Exception as e:
-            print(f"[Sleep Phase] Error during cycle 2 optimization: {e}")
-            import traceback
-            traceback.print_exc()
-            # Reset gradients
-            optimizer.zero_grad()
-        
-        # Clear memory
-        th.cuda.empty_cache()
-    
-    # Report statistics for cycle 2
-    if num_transitions > 0:
-        avg_aux_value_loss = aux_value_loss_sum / num_transitions
-        avg_policy_distill_loss = policy_distill_loss_sum / max(1, num_transitions)
-        print(f"[Sleep Phase] Cycle 2/2 completed - "
-              f"Transitions: {num_transitions}, "
-              f"AvgAuxValueLoss: {avg_aux_value_loss:.6f}, "
-              f"AvgPolicyDistillLoss: {avg_policy_distill_loss:.6f}")
-    else:
-        print(f"[Sleep Phase] Cycle 2/2 - No transitions processed")
-    
-    # Final cleanup
-    th.cuda.empty_cache()
-    print("[Sleep Phase] Completed")
 
+            aux_value_loss_sum += aux_v_loss.item() * len(batch)
+            n_transitions_cycle1 += len(batch)
+
+        # Finally, store all transitions in our global array for cycle 2
+        all_processed_transitions.extend(transitions)
+
+    # Logging for cycle 1
+    if n_transitions_cycle1 > 0:
+        avg_aux_value_loss = aux_value_loss_sum / n_transitions_cycle1
+        print(f"[Sleep Phase] Cycle 1/2 done. #Trans={n_transitions_cycle1}, AuxValueLoss={avg_aux_value_loss:.5f}")
+    else:
+        print("[Sleep Phase] Cycle 1/2 done. No transitions processed.")
+
+    # -------------
+    # Cycle 2: We do the distillation from 'orig_pi' (the old distribution) to the current policy
+    #          plus possibly another pass on the aux value head.
+    # -------------
+    print(f"\n[Sleep Phase] Starting Cycle 2/2 on {len(all_processed_transitions)} transitions ...")
+
+    aux_value_loss_sum2 = 0.0
+    policy_kl_loss_sum = 0.0
+    n_transitions_cycle2 = 0
+
+    # We'll do small batches again
+    for batch_start in range(0, len(all_processed_transitions), batch_size):
+        batch_end = min(batch_start + batch_size, len(all_processed_transitions))
+        batch = all_processed_transitions[batch_start:batch_end]
+        if not batch:
+            continue
+
+        # Filter out transitions that do not have 'orig_pi'
+        # (should normally never happen if we set them above, but let's be safe)
+        batch = [t for t in batch if "orig_pi" in t]
+        if not batch:
+            continue
+
+        # Move returns & obs to GPU
+        returns = th.tensor([t["return"] for t in batch], device="cuda")
+        obs_list = [t["obs"] for t in batch]
+        actions_list = [t["action"] for t in batch]
+
+        # Zero gradients
+        optimizer.zero_grad(set_to_none=True)
+
+        # Forward pass with the *current* policy
+        with th.enable_grad():
+            out = agent.get_sequence_and_training_info(
+                minerl_obs_list=obs_list,
+                initial_hidden_state=agent.policy.initial_state(1),
+                stochastic=False,
+                taken_actions_list=actions_list
+            )
+            if len(out) >= 5:
+                curr_pi_dist_seq, _, aux_vpred_seq, _, _ = out
+            else:
+                curr_pi_dist_seq, _, _, _ = out
+                aux_vpred_seq = None
+
+        with th.autocast(device_type='cuda'):
+            # 1) Aux value loss
+            if aux_vpred_seq is not None:
+                aux_val_loss = ((aux_vpred_seq - returns)**2).mean()
+            else:
+                aux_val_loss = th.tensor(0.0, device="cuda")
+
+            # 2) Distillation loss: KL between current pi and 'orig_pi'
+            kl_terms = []
+            for i, t in enumerate(batch):
+                # Move old distribution back to GPU in a *small* dict
+                orig_pi = {k: v.to("cuda") for k, v in t["orig_pi"].items()}
+                # The current pi for this step is curr_pi_dist_seq[k][i]
+                curr_pi_i = {k: v[i] for k, v in curr_pi_dist_seq.items()}
+                # Compute KL or cross-entropy from orig_pi => curr_pi
+                # (Your code calls 'compute_kl_loss' or similar)
+                kl = compute_kl_loss(curr_pi_i, orig_pi)
+                kl_terms.append(kl)
+
+            if len(kl_terms) == 0:
+                pol_kl_loss = th.tensor(0.0, device="cuda")
+            else:
+                pol_kl_loss = th.stack(kl_terms).mean()
+
+            # Weighted sum
+            #   typically: (aux value loss) + beta_clone * pol_kl_loss
+            #   or more complex weighting as you prefer
+            total_loss = aux_val_loss + (beta_clone * pol_kl_loss)
+
+        # Backprop
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
+        th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
+        scaler.step(optimizer)
+        scaler.update()
+
+        # Logging sums
+        aux_value_loss_sum2 += aux_val_loss.item() * len(batch)
+        policy_kl_loss_sum += pol_kl_loss.item() * len(batch)
+        n_transitions_cycle2 += len(batch)
+
+        # Free GPU memory for orig_pi if we want
+        # (But in Python it’s enough that they go out of scope here.)
+
+    # Final logs for cycle 2
+    if n_transitions_cycle2 > 0:
+        avg_aux_val_loss2 = aux_value_loss_sum2 / n_transitions_cycle2
+        avg_kl_loss = policy_kl_loss_sum / n_transitions_cycle2
+        print(f"[Sleep Phase] Cycle 2/2 done. #Trans={n_transitions_cycle2}, "
+              f"AuxValLoss={avg_aux_val_loss2:.5f}, KL={avg_kl_loss:.5f}")
+    else:
+        print("[Sleep Phase] Cycle 2/2 done. No transitions processed.")
+
+    print("[Sleep Phase] Completed.\n")
+    th.cuda.empty_cache()
 
 # Run policy optimization (wake phase)
 def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler, 
