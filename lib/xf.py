@@ -27,7 +27,7 @@ def attention(
     """Fixed attention function that preserves full context"""
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
-    print(f"attention: Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
+    #print(f"attention: Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
     # IMPORTANT: Never truncate K/V - always preserve full context window
     # This means we keep T at 128 even in batch mode
     
@@ -618,8 +618,8 @@ class SelfAttentionLayer(AttentionLayerBase):
             
             # Concatenate
             full = th.cat([prev, new], dim=1)
-            print(f"prev shape: {prev.shape}, new shape: {new.shape}, full_length: {full_length}")
-            print(f"After trunc/concat: {full.shape}")
+            #print(f"prev shape: {prev.shape}, new shape: {new.shape}, full_length: {full_length}")
+            #print(f"After trunc/concat: {full.shape}")
             # Ensure we don't exceed maxlen
             assert full.shape[1] <= self.maxlen, f"Sequence too long: {full.shape[1]} > {self.maxlen}"
             
