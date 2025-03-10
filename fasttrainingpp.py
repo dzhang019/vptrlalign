@@ -147,33 +147,31 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
 # Thread for coordinating environments and collecting rollouts
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
                        out_episodes, stop_flag, num_envs, phase_coordinator):
-    # Initialize tracking variables
+    # Initialize tracking variables (unchanged)
     obs_list = [None] * num_envs
     done_list = [False] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
-    # Wait for initial observations from all environments
-    print(f"[ENV TIMING] {time.time():.3f} - Waiting for initial observations from {num_envs} envs")
+    # Wait for initial observations from all environments (unchanged)
     for _ in range(num_envs):
         env_id, _, obs, _, _, _ = result_queue.get()
         obs_list[env_id] = obs
-        print(f"[ENV TIMING] {time.time():.3f} - Got initial observation from env {env_id}")
+        print(f"[Environment Thread] Got initial observation from env {env_id}")
     
     iteration = 0
     while not stop_flag[0]:
-        # Check if we're in auxiliary phase - if so, wait
+        # Check if we're in auxiliary phase - if so, wait (unchanged)
         if phase_coordinator.in_auxiliary_phase():
-            print(f"[ENV TIMING] {time.time():.3f} - Pausing collection during auxiliary phase")
-            phase_coordinator.auxiliary_phase_complete.wait(timeout=0.1)
+            print("[Environment Thread] Pausing collection during auxiliary phase")
+            phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
             if phase_coordinator.in_auxiliary_phase():
                 continue
         
         iteration += 1
         start_time = time.time()
-        print(f"[ENV TIMING] {start_time:.3f} - Starting iteration {iteration}")
         
-        # Initialize rollouts for each environment
+        # Initialize rollouts for each environment (unchanged)
         rollouts = [
             {
                 "obs": [],
@@ -186,77 +184,60 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             for _ in range(num_envs)
         ]
         
-        # Collect rollouts
-        for step in range(rollout_steps):
-            step_start = time.time()
-            print(f"[ENV TIMING] {step_start:.3f} - Step {step+1}/{rollout_steps} starting")
-            
+        # Track which environments are waiting for results
+        env_waiting_for_result = [False] * num_envs
+        env_step_counts = [0] * num_envs
+        
+        # Start all environments processing at once
+        for env_id in range(num_envs):
+            if obs_list[env_id] is not None:
+                # Generate action using agent (unchanged)
+                with th.no_grad():
+                    action_info = agent.get_action_and_training_info(
+                        minerl_obs=obs_list[env_id],
+                        hidden_state=hidden_states[env_id],
+                        stochastic=True,
+                        taken_action=None
+                    )
+                    
+                    # Extract new hidden state (last element of return tuple)
+                    minerl_action = action_info[0]
+                    new_hid = action_info[-1]
+                
+                # Update hidden state (unchanged)
+                hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                
+                # Send action to environment
+                action_queues[env_id].put(minerl_action)
+                env_waiting_for_result[env_id] = True
+        
+        # Process environment results until all steps are complete
+        total_transitions = 0
+        while total_transitions < rollout_steps * num_envs:
             # Check if auxiliary phase started during collection
             if phase_coordinator.in_auxiliary_phase():
-                print(f"[ENV TIMING] {time.time():.3f} - Auxiliary phase started during collection, step {step}/{rollout_steps}")
+                print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
                 break
+            
+            try:
+                # Get result from any environment
+                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=0.1)
                 
-            # For each environment, generate action and send it
-            action_gen_start = time.time()
-            for env_id in range(num_envs):
-                env_action_start = time.time()
-                if obs_list[env_id] is not None:
-                    # Generate action using agent
-                    with th.no_grad():
-                        # Handle different return signatures based on whether aux head exists
-                        action_info = agent.get_action_and_training_info(
-                            minerl_obs=obs_list[env_id],
-                            hidden_state=hidden_states[env_id],
-                            stochastic=True,
-                            taken_action=None
-                        )
-                        
-                        # Extract new hidden state (last element of return tuple)
-                        minerl_action = action_info[0]
-                        new_hid = action_info[-1]
-                    
-                    # Update hidden state
-                    hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-                    
-                    # Send action to environment
-                    action_queues[env_id].put(minerl_action)
-                    
-                    print(f"[ENV TIMING] [Env {env_id}] {time.time():.3f} - Generated action took {time.time() - env_action_start:.3f}s")
-            
-            action_gen_time = time.time() - action_gen_start
-            print(f"[ENV TIMING] {time.time():.3f} - All actions generated in {action_gen_time:.3f}s")
-            
-            # Collect results from all environments
-            collect_start = time.time()
-            env_result_times = {}  # Track when each env starts returning results
-            pending_results = num_envs
-            while pending_results > 0:
-                try:
-                    get_start_time = time.time()
-                    env_id, action, next_obs, done, reward, info = result_queue.get(timeout=1.0)
-                    result_time = time.time()
-                    
-                    # Store first result time for this env in this step
-                    if env_id not in env_result_times:
-                        env_result_times[env_id] = result_time - collect_start
-                    
-                    # Check if this is an episode completion signal
-                    if action is None and done and next_obs is None:
-                        # This is an episode completion notification
-                        episode_length = reward  # Using reward field to pass episode length
-                        with open(out_episodes, "a") as f:
-                            f.write(f"{episode_length}\n")
-                        print(f"[ENV TIMING] [Env {env_id}] {time.time():.3f} - Episode complete signal")
-                        continue  # Don't decrement pending_results, we'll get a new obs
-                    
-                    # Check if this is an observation update without stepping
-                    if action is None and not done:
-                        obs_list[env_id] = next_obs
-                        print(f"[ENV TIMING] [Env {env_id}] {time.time():.3f} - Initial obs")
-                        continue  # Don't decrement pending_results
-                    
-                    # Normal step result - store in rollout
-                    process_start = time.time()
+                # Check if this is an episode completion signal
+                if action is None and done and next_obs is None:
+                    # This is an episode completion notification
+                    episode_length = reward  # Using reward field to pass episode length
+                    with open(out_episodes, "a") as f:
+                        f.write(f"{episode_length}\n")
+                    continue  # Don't count this as a transition
+                
+                # Check if this is an observation update without stepping
+                if action is None and not done:
+                    obs_list[env_id] = next_obs
+                    continue  # Don't count this as a transition
+                
+                # Normal step result - store in rollout if we were waiting for this environment
+                if env_waiting_for_result[env_id]:
                     rollouts[env_id]["obs"].append(obs_list[env_id])
                     rollouts[env_id]["actions"].append(action)
                     rollouts[env_id]["rewards"].append(reward)
@@ -273,56 +254,53 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     if done:
                         hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
                     
-                    print(f"[ENV TIMING] [Env {env_id}] {time.time():.3f} - Got result (get: {result_time - get_start_time:.3f}s, process: {time.time() - process_start:.3f}s)")
+                    # Mark environment as processed
+                    env_waiting_for_result[env_id] = False
+                    env_step_counts[env_id] += 1
+                    total_transitions += 1
                     
-                    pending_results -= 1
-                    
-                except queue.Empty:
-                    print(f"[ENV TIMING] {time.time():.3f} - Timeout waiting for results in step {step}")
-                    break
-            
-            # Print timing for each environment
-            print(f"[ENV TIMING] {time.time():.3f} - Environment result times:")
-            for env_id, result_time in env_result_times.items():
-                print(f"[ENV TIMING] [Env {env_id}] Result time: {result_time:.3f}s")
-                
-            collect_time = time.time() - collect_start
-            print(f"[ENV TIMING] {time.time():.3f} - All results collected in {collect_time:.3f}s")
-            
-            step_time = time.time() - step_start
-            print(f"[ENV TIMING] {time.time():.3f} - Step {step+1} complete in {step_time:.3f}s (action gen: {action_gen_time:.3f}s, collection: {collect_time:.3f}s)")
+                    # If this environment needs more steps, immediately send next action
+                    if env_step_counts[env_id] < rollout_steps:
+                        # Generate next action
+                        with th.no_grad():
+                            action_info = agent.get_action_and_training_info(
+                                minerl_obs=obs_list[env_id],
+                                hidden_state=hidden_states[env_id],
+                                stochastic=True,
+                                taken_action=None
+                            )
+                            
+                            # Extract new hidden state (last element of return tuple)
+                            minerl_action = action_info[0]
+                            new_hid = action_info[-1]
+                        
+                        # Update hidden state
+                        hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                        
+                        # Send action to environment
+                        action_queues[env_id].put(minerl_action)
+                        env_waiting_for_result[env_id] = True
+            except queue.Empty:
+                # No results available, continue checking
+                continue
         
         # Check if we're in auxiliary phase again before putting rollouts in queue
-        queue_start = time.time()
         if not phase_coordinator.in_auxiliary_phase():
             # Send collected rollouts to training thread
             end_time = time.time()
             duration = end_time - start_time
             
             # Count total transitions
-            total_transitions = sum(len(r["obs"]) for r in rollouts)
-            transitions_per_env = [len(r["obs"]) for r in rollouts]
+            actual_transitions = sum(len(r["obs"]) for r in rollouts)
             
-            print(f"[ENV TIMING] {time.time():.3f} - Putting {total_transitions} transitions in queue")
-            print(f"[ENV TIMING] Transitions per env: {transitions_per_env}")
-            
-            queue_put_start = time.time()
-            rollout_queue.put(rollouts)
-            print(f"[ENV TIMING] {time.time():.3f} - Queue put completed in {time.time() - queue_put_start:.3f}s")
-            
-            print(f"[Environment Thread] Iteration {iteration} collected {total_transitions} transitions "
+            print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions "
                 f"across {num_envs} envs in {duration:.3f}s")
+            
+            rollout_queue.put(rollouts)
         else:
             # Buffer the rollouts for later use
-            print(f"[ENV TIMING] {time.time():.3f} - Buffering {sum(len(r['obs']) for r in rollouts)} transitions")
-            phase_coordinator.buffer_rollout(rollouts)
             print(f"[Environment Thread] Iteration {iteration} - buffering {sum(len(r['obs']) for r in rollouts)} transitions")
-        
-        queue_time = time.time() - queue_start
-        print(f"[ENV TIMING] {time.time():.3f} - Queue operations completed in {queue_time:.3f}s")
-        
-        total_time = time.time() - start_time
-        print(f"[ENV TIMING] {time.time():.3f} - Iteration {iteration} completed in {total_time:.3f}s")
+            phase_coordinator.buffer_rollout(rollouts)
 
 
 # Process rollouts from a single environment
