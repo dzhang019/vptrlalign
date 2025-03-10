@@ -707,7 +707,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     # Final cleanup and memory usage reporting
     del cycle2_data
     th.cuda.empty_cache()
-    print(f"Final CUDA memory: {th.cuda.memory_allocated() / 1e9:.2f} GB")
+    #print(f"Final CUDA memory: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     print("[Sleep Phase] Completed")
 
 # Run policy optimization (wake phase)
