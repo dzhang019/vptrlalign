@@ -419,6 +419,8 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
 
 
 # Run a PPG sleep phase
+import torch as th
+
 def run_sleep_phase(
     agent,
     recent_rollouts,
@@ -430,89 +432,105 @@ def run_sleep_phase(
     batch_size=16,
 ):
     """
-    Runs the "sleep" phase in PPG:
-      Cycle 1: 
-        - chunk rollouts, gather 'orig_pi' from the agent's forward pass, store on CPU
-        - optionally do an auxiliary-value update
-      Cycle 2:
-        - do policy distillation from orig_pi (on CPU) to current policy (on GPU, in small batches)
-        - optionally do another aux-value step
+    Modified sleep phase with step-by-step memory debug prints.
     """
-    # Check if we have an auxiliary value head
+    # Quick check
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if not has_aux_head:
         print("[Sleep Phase] Skipping — no auxiliary value head.")
         return
 
-    print(f"[Sleep Phase] Starting with {len(recent_rollouts)} recent rollouts.")
-
+    print(f"[Sleep Phase] Running with {len(recent_rollouts)} rollouts.")
+    
     # -------------
-    # Cycle 1: process each rollout, store old distribution on CPU, do a small aux-value update
+    # Cycle 1
     # -------------
-    print("\n[Sleep Phase] Cycle 1/2: storing 'orig_pi' on CPU and optionally training aux-value head.")
-    cycle1_aux_val_loss = 0.0
+    print("\n[Sleep Phase] CYCLE 1/2: Gathering 'orig_pi' on CPU + optional aux-value training.")
+    
+    # For debugging memory usage across loop iterations
+    cycle1_aux_val_loss_sum = 0.0
     cycle1_trans_count = 0
+    
+    all_processed_transitions = []
+    
+    for rollout_idx, rollout in enumerate(recent_rollouts):
+        if len(rollout["obs"]) == 0:
+            continue
 
-    # We'll store the final transitions (with orig_pi) in one giant list
-    # so we can do cycle 2 easily
-    all_transitions = []
+        # Reset the peak stats at the start of each rollout to see usage within it
+        th.cuda.reset_peak_memory_stats(device="cuda")
+        allocated0 = th.cuda.memory_allocated(device="cuda") / 1e6
+        reserved0 = th.cuda.memory_reserved(device="cuda") / 1e6
+        print(f"[SleepPh:C1] Start rollout {rollout_idx}: allocated={allocated0:.1f} MB, reserved={reserved0:.1f} MB")
 
-    for r_idx, rollout in enumerate(recent_rollouts):
-        if not rollout["obs"]:
-            continue  # skip empty
-
-        # Step A: convert the rollout to transitions with returns
+        # Step A: process rollout
         transitions = train_unroll(agent, agent, rollout)
         if not transitions:
             continue
 
-        # Step B: chunk these transitions in sub-sequences of length <= max_seq_len
-        #         do a forward pass to get policy distributions, store them on CPU
         for start in range(0, len(transitions), max_seq_len):
             end = min(start + max_seq_len, len(transitions))
             chunk = transitions[start:end]
-            # gather obs & actions
+            
+            # We measure memory before the forward pass for chunk
+            th.cuda.reset_peak_memory_stats(device="cuda")
+            allocated1a = th.cuda.memory_allocated(device="cuda") / 1e6
+            reserved1a = th.cuda.memory_reserved(device="cuda") / 1e6
+            print(f"  [SleepPh:C1] rollout {rollout_idx}, chunkStart={start}: pre-forward allocated={allocated1a:.1f} MB, reserved={reserved1a:.1f} MB")
+
+            # Observations / actions for chunk
             chunk_obs = [t["obs"] for t in chunk]
             chunk_actions = [t["action"] for t in chunk]
 
+            # Forward pass to get pi_dist_seq
             with th.no_grad():
-                seq_result = agent.get_sequence_and_training_info(
+                seq_outputs = agent.get_sequence_and_training_info(
                     minerl_obs_list=chunk_obs,
-                    initial_hidden_state=agent.policy.initial_state(batch_size=1),
+                    initial_hidden_state=agent.policy.initial_state(1),
                     stochastic=False,
                     taken_actions_list=chunk_actions
                 )
-                # typically returns (pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hidden)
-                if len(seq_result) >= 5:
-                    pi_dist_seq, _, aux_vpred_seq, _, _ = seq_result
+                if len(seq_outputs) >= 5:
+                    pi_dist_seq, _, aux_vpred_seq, _, _ = seq_outputs
                 else:
-                    pi_dist_seq, _, _, _ = seq_result
+                    pi_dist_seq, _, _, _ = seq_outputs
                     aux_vpred_seq = None
 
-            # For each step in this chunk, store orig_pi on CPU
+            # Check memory right after forward pass
+            allocated1b = th.cuda.max_memory_allocated(device="cuda") / 1e6
+            reserved1b = th.cuda.max_memory_reserved(device="cuda") / 1e6
+            print(f"  [SleepPh:C1] rollout {rollout_idx}, chunkStart={start}: post-forward allocated={allocated1b:.1f} MB, reserved={reserved1b:.1f} MB")
+
+            # Store "orig_pi" on CPU
             for i, t in enumerate(chunk):
-                # slice the i-th step from each distribution field
-                # then move it to CPU
                 t["orig_pi"] = {
-                    k: v[i].clone().detach().cpu()
-                    for k, v in pi_dist_seq.items()
+                    k: v[i].clone().detach().cpu() for k, v in pi_dist_seq.items()
                 }
-        
-        # Step C: optional: do an auxiliary value update in small minibatches
-        #        so that the aux head starts learning from these returns
-        for b_start in range(0, len(transitions), batch_size):
-            b_end = min(b_start + batch_size, len(transitions))
-            batch = transitions[b_start:b_end]
+            
+            # Another memory check after storing
+            allocated1c = th.cuda.max_memory_allocated(device="cuda") / 1e6
+            reserved1c = th.cuda.max_memory_reserved(device="cuda") / 1e6
+            print(f"  [SleepPh:C1] rollout {rollout_idx}, chunkStart={start}: after storing orig_pi allocated={allocated1c:.1f} MB, reserved={reserved1c:.1f} MB")
+
+        # Step B: optional: do an aux-value update in small batches
+        for batch_start in range(0, len(transitions), batch_size):
+            batch_end = min(batch_start + batch_size, len(transitions))
+            batch = transitions[batch_start:batch_end]
             if not batch:
                 continue
 
-            # gather returns
+            # Collect returns, obs, actions
             returns = th.tensor([t["return"] for t in batch], device="cuda")
             obs_list = [t["obs"] for t in batch]
             act_list = [t["action"] for t in batch]
+            
+            # Memory debug pre-forward
+            th.cuda.reset_peak_memory_stats(device="cuda")
+            allocated2a = th.cuda.memory_allocated(device="cuda") / 1e6
+            reserved2a = th.cuda.memory_reserved(device="cuda") / 1e6
+            print(f"  [SleepPh:C1] rollout {rollout_idx}, batchStart={batch_start}: pre-aux-fwd allocated={allocated2a:.1f} MB, reserved={reserved2a:.1f} MB")
 
             optimizer.zero_grad(set_to_none=True)
-
             with th.enable_grad():
                 out = agent.get_sequence_and_training_info(
                     minerl_obs_list=obs_list,
@@ -520,7 +538,6 @@ def run_sleep_phase(
                     stochastic=False,
                     taken_actions_list=act_list
                 )
-                # check if we have aux vpred
                 if len(out) >= 5:
                     _, _, aux_vpred_seq, _, _ = out
                 else:
@@ -528,55 +545,66 @@ def run_sleep_phase(
 
             if aux_vpred_seq is not None:
                 with th.autocast(device_type='cuda'):
-                    aux_loss = ((aux_vpred_seq - returns) ** 2).mean()
+                    aux_loss = ((aux_vpred_seq - returns)**2).mean()
+                
                 scaler.scale(aux_loss).backward()
                 scaler.unscale_(optimizer)
                 th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
 
-                cycle1_aux_val_loss += aux_loss.item() * len(batch)
+                cycle1_aux_val_loss_sum += aux_loss.item() * len(batch)
                 cycle1_trans_count += len(batch)
 
-        # Step D: after we do that small pass, 
-        #         add all transitions to a global list for cycle 2 distillation
-        all_transitions.extend(transitions)
+            # Memory debug post-forward
+            allocated2b = th.cuda.max_memory_allocated(device="cuda") / 1e6
+            reserved2b = th.cuda.max_memory_reserved(device="cuda") / 1e6
+            print(f"  [SleepPh:C1] rollout {rollout_idx}, batchStart={batch_start}: post-aux-bwd allocated={allocated2b:.1f} MB, reserved={reserved2b:.1f} MB")
 
-    # Logging for cycle 1
+        # Add transitions for Cycle 2 distillation
+        all_processed_transitions.extend(transitions)
+
+    # Summaries for Cycle 1
     if cycle1_trans_count > 0:
-        avg_aux_loss_c1 = cycle1_aux_val_loss / cycle1_trans_count
-        print(f"[Sleep Phase] Cycle 1 done: {cycle1_trans_count} transitions, AuxValLoss={avg_aux_loss_c1:.5f}")
+        avg_aux_val_loss_c1 = cycle1_aux_val_loss_sum / cycle1_trans_count
+        print(f"[Sleep Phase] Cycle1 done => #Trans={cycle1_trans_count}, AuxValLoss={avg_aux_val_loss_c1:.5f}")
     else:
-        print("[Sleep Phase] Cycle 1 done: no transitions processed for aux-value update.")
+        print("[Sleep Phase] Cycle1 done => No transitions processed for aux-value update.")
+
 
     # -------------
-    # Cycle 2: do distillation (KL) from orig_pi => current policy, optional more aux-value
+    # Cycle 2
     # -------------
-    print("\n[Sleep Phase] Cycle 2/2: Distilling policy from stored 'orig_pi'")
-
+    print("\n[Sleep Phase] CYCLE 2/2: Distilling from stored 'orig_pi' to current policy + optional aux-value update.")
+    cycle2_aux_val_loss_sum = 0.0
+    cycle2_kl_loss_sum = 0.0
     cycle2_trans_count = 0
-    cycle2_aux_val_loss = 0.0
-    cycle2_kl_loss = 0.0
 
-    for batch_start in range(0, len(all_transitions), batch_size):
-        batch_end = min(batch_start + batch_size, len(all_transitions))
-        batch = all_transitions[batch_start:batch_end]
+    for batch_start in range(0, len(all_processed_transitions), batch_size):
+        batch_end = min(batch_start + batch_size, len(all_processed_transitions))
+        batch = all_processed_transitions[batch_start:batch_end]
         if not batch:
             continue
 
-        # skip transitions that have no orig_pi
+        # Filter only transitions that have "orig_pi"
         batch = [t for t in batch if "orig_pi" in t]
         if not batch:
             continue
 
-        # gather returns on GPU
+        # Debug pre-forward memory
+        th.cuda.reset_peak_memory_stats(device="cuda")
+        allocatedC2_1 = th.cuda.memory_allocated(device="cuda") / 1e6
+        reservedC2_1 = th.cuda.memory_reserved(device="cuda") / 1e6
+        print(f"  [SleepPh:C2] batchStart={batch_start}: pre-forward allocated={allocatedC2_1:.1f} MB, reserved={reservedC2_1:.1f} MB")
+
+        # Observations, returns
         returns = th.tensor([t["return"] for t in batch], device="cuda")
         obs_list = [t["obs"] for t in batch]
         act_list = [t["action"] for t in batch]
 
         optimizer.zero_grad(set_to_none=True)
 
-        # forward pass with the *current* policy
+        # Forward pass with current policy
         with th.enable_grad():
             out = agent.get_sequence_and_training_info(
                 minerl_obs_list=obs_list,
@@ -585,59 +613,60 @@ def run_sleep_phase(
                 taken_actions_list=act_list
             )
             if len(out) >= 5:
-                curr_pi_dist_seq, _, aux_vpred_seq, _, _ = out
+                curr_pi_seq, _, aux_vpred_seq, _, _ = out
             else:
-                curr_pi_dist_seq, _, _, _ = out
+                curr_pi_seq, _, _, _ = out
                 aux_vpred_seq = None
 
         with th.autocast(device_type='cuda'):
-            # (a) aux-value loss
+            # Aux-value loss if desired
             if aux_vpred_seq is not None:
-                aux_loss = ((aux_vpred_seq - returns) ** 2).mean()
+                aux_loss = ((aux_vpred_seq - returns)**2).mean()
             else:
                 aux_loss = th.tensor(0.0, device="cuda")
 
-            # (b) policy distillation KL
+            # Distillation KL
             kl_list = []
             for i, t in enumerate(batch):
-                # move old distribution (CPU) => GPU
-                orig_pi_cpu = t["orig_pi"]
-                orig_pi_gpu = {k: v.to("cuda") for k, v in orig_pi_cpu.items()}
-                # slice the i-th step from curr_pi_dist_seq
-                curr_pi_i = {k: v[i] for k, v in curr_pi_dist_seq.items()}
-                # compute kl
-                kl_val = compute_kl_loss(curr_pi_i, orig_pi_gpu)
+                # Move old distribution to GPU
+                orig_pi = {k: v.to("cuda") for k, v in t["orig_pi"].items()}
+                curr_pi_i = {k: v[i] for k, v in curr_pi_seq.items()}
+                kl_val = compute_kl_loss(curr_pi_i, orig_pi)
                 kl_list.append(kl_val)
             if kl_list:
-                policy_kl = th.stack(kl_list).mean()
+                pol_kl = th.stack(kl_list).mean()
             else:
-                policy_kl = th.tensor(0.0, device="cuda")
+                pol_kl = th.tensor(0.0, device="cuda")
 
-            # combine
-            total_loss = aux_loss + beta_clone * policy_kl
+            total_loss = aux_loss + beta_clone * pol_kl
 
-        # backprop
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
 
-        # track stats
-        cycle2_aux_val_loss += aux_loss.item() * len(batch)
-        cycle2_kl_loss += policy_kl.item() * len(batch)
+        # Memory after backprop
+        allocatedC2_2 = th.cuda.max_memory_allocated(device="cuda") / 1e6
+        reservedC2_2 = th.cuda.max_memory_reserved(device="cuda") / 1e6
+        print(f"  [SleepPh:C2] batchStart={batch_start}: post-bwd allocated={allocatedC2_2:.1f} MB, reserved={reservedC2_2:.1f} MB")
+
+        # Stats
+        cycle2_aux_val_loss_sum += aux_loss.item() * len(batch)
+        cycle2_kl_loss_sum += pol_kl.item() * len(batch)
         cycle2_trans_count += len(batch)
 
-    # done cycle 2
+    # Summaries for Cycle 2
     if cycle2_trans_count > 0:
-        avg_aux_loss_c2 = cycle2_aux_val_loss / cycle2_trans_count
-        avg_kl_loss_c2 = cycle2_kl_loss / cycle2_trans_count
-        print(f"[Sleep Phase] Cycle 2 done: {cycle2_trans_count} transitions, AuxValLoss={avg_aux_loss_c2:.5f}, KL={avg_kl_loss_c2:.5f}")
+        avg_aux_val_loss_c2 = cycle2_aux_val_loss_sum / cycle2_trans_count
+        avg_kl_loss_c2 = cycle2_kl_loss_sum / cycle2_trans_count
+        print(f"[Sleep Phase] Cycle2 done => #Trans={cycle2_trans_count}, AuxValLoss={avg_aux_val_loss_c2:.5f}, KL={avg_kl_loss_c2:.5f}")
     else:
-        print("[Sleep Phase] Cycle 2 done: no transitions processed or no 'orig_pi' found.")
+        print("[Sleep Phase] Cycle2 done => No valid transitions or 'orig_pi' found.")
 
     print("[Sleep Phase] Completed.\n")
     th.cuda.empty_cache()
+
 
 
 # Run policy optimization (wake phase)
