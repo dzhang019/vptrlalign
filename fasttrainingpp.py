@@ -420,7 +420,7 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
 
 # Run a PPG sleep phase
 def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
-    """Run the PPG auxiliary phase (sleep phase) with simplified approach."""
+    """Run the PPG auxiliary phase with proper handling of transformer context limits."""
     # Check if agent has auxiliary value head
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if not has_aux_head:
@@ -429,8 +429,10 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     
     print(f"[Sleep Phase] Running with {len(recent_rollouts)} rollouts")
     
-    # First cycle: optimize auxiliary value function only
-    # Second cycle: optimize auxiliary value function + policy distillation
+    # Maximum sequence length to process at once
+    MAX_SEQ_LEN = 128  # Match your transformer's context length
+    
+    # Process two sleep cycles
     for sleep_cycle in range(2):
         print(f"[Sleep Phase] Running sleep cycle {sleep_cycle+1}/2")
         
@@ -439,22 +441,49 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         policy_distill_loss_sum = 0.0
         num_transitions = 0
         
-        # Process each rollout separately to manage memory better
+        # Process each rollout separately
         for rollout_idx, rollout in enumerate(recent_rollouts):
             if len(rollout["obs"]) == 0:
                 continue
                 
             print(f"[Sleep Phase] Processing rollout {rollout_idx+1}/{len(recent_rollouts)} in cycle {sleep_cycle+1}/2")
             
-            # Get transitions with returns for this rollout
+            # Process rollout to get transitions with returns calculation
             transitions = train_unroll(agent, agent, rollout)
             if len(transitions) == 0:
                 continue
-                
-            # Use a small batch size to prevent memory issues
-            batch_size = 16 
+            
+            # Store original policy distributions in first cycle
+            if sleep_cycle == 0:
+                # Process in smaller chunks that fit transformer context
+                for chunk_start in range(0, len(transitions), MAX_SEQ_LEN):
+                    chunk_end = min(chunk_start + MAX_SEQ_LEN, len(transitions))
+                    chunk = transitions[chunk_start:chunk_end]
+                    
+                    # Get obs and actions for this chunk
+                    chunk_obs = [t["obs"] for t in chunk]
+                    chunk_actions = [t["action"] for t in chunk]
+                    
+                    # Store original policy distributions
+                    with th.no_grad():
+                        outputs = agent.get_sequence_and_training_info(
+                            minerl_obs_list=chunk_obs,
+                            initial_hidden_state=agent.policy.initial_state(1),
+                            stochastic=False,
+                            taken_actions_list=chunk_actions
+                        )
+                        
+                        # Save distributions
+                        if len(outputs) >= 5:
+                            pi_dist_seq = outputs[0]
+                            for i, t in enumerate(chunk):
+                                t["orig_pi"] = {k: v[i].clone().detach() for k, v in pi_dist_seq.items()}
+            
+            # Process optimization in batches that respect context length
+            batch_size = min(16, MAX_SEQ_LEN)  # Batch size shouldn't exceed max sequence length
+            
             for batch_start in range(0, len(transitions), batch_size):
-                # Clear CUDA cache before processing
+                # Clear CUDA cache
                 th.cuda.empty_cache()
                 
                 batch_end = min(batch_start + batch_size, len(transitions))
@@ -468,27 +497,8 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                 # Zero gradients
                 optimizer.zero_grad()
                 
-                # First sleep cycle: Store original policy distribution for second cycle
-                if sleep_cycle == 0:
-                    # Forward pass with no_grad since we only need distributions
-                    with th.no_grad():
-                        # Get fresh policy distributions 
-                        outputs = agent.get_sequence_and_training_info(
-                            minerl_obs_list=batch_obs,
-                            initial_hidden_state=agent.policy.initial_state(1),
-                            stochastic=False,
-                            taken_actions_list=batch_actions
-                        )
-                        
-                        # Save original policy distributions for second cycle
-                        if len(outputs) >= 5:
-                            pi_dist_seq = outputs[0]
-                            for i, t in enumerate(batch):
-                                t["orig_pi"] = {k: v[i].clone().detach() for k, v in pi_dist_seq.items()}
-                
-                # Forward pass with full computation graph
+                # Forward pass with gradients
                 with th.enable_grad():
-                    # Get fresh policy outputs with gradients
                     outputs = agent.get_sequence_and_training_info(
                         minerl_obs_list=batch_obs,
                         initial_hidden_state=agent.policy.initial_state(1),
@@ -496,20 +506,20 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                         taken_actions_list=batch_actions
                     )
                     
-                    # Extract predictions - make sure we have auxiliary values
+                    # Get auxiliary values
                     if len(outputs) >= 5:
                         curr_pi, _, aux_values, _, _ = outputs
                     else:
-                        print("[Sleep Phase] Error: No auxiliary value predictions in outputs")
+                        print("[Sleep Phase] Error: No auxiliary value predictions")
                         continue
                 
                 try:
-                    # Compute losses based on cycle
+                    # Compute losses
                     with th.autocast(device_type='cuda'):
-                        # Auxiliary value loss (both cycles)
+                        # Auxiliary value loss
                         aux_value_loss = ((aux_values - batch_returns) ** 2).mean()
                         
-                        # Only add policy distillation in second cycle
+                        # Policy distillation in second cycle
                         if sleep_cycle == 1 and all("orig_pi" in t for t in batch):
                             policy_distill_losses = []
                             for i, t in enumerate(batch):
@@ -519,15 +529,20 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                                 kl_loss = compute_kl_loss(curr_pi_i, orig_pi)
                                 policy_distill_losses.append(kl_loss)
                             
-                            policy_distill_loss = th.stack(policy_distill_losses).mean()
-                            loss = aux_value_loss + beta_clone * policy_distill_loss
-                            policy_distill_loss_val = policy_distill_loss.item()
+                            if policy_distill_losses:
+                                policy_distill_loss = th.stack(policy_distill_losses).mean()
+                                loss = aux_value_loss + beta_clone * policy_distill_loss
+                                policy_distill_loss_val = policy_distill_loss.item()
+                            else:
+                                # Fallback if we couldn't compute distillation loss
+                                loss = aux_value_loss
+                                policy_distill_loss_val = 0.0
                         else:
                             # First cycle: only auxiliary value loss
                             loss = aux_value_loss
                             policy_distill_loss_val = 0.0
                     
-                    # Backward pass and optimize
+                    # Backward and optimize
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
@@ -543,13 +558,13 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                     print(f"[Sleep Phase] Error during optimization: {e}")
                     import traceback
                     traceback.print_exc()
-                    # Reset any hanging gradients
+                    # Reset gradients
                     optimizer.zero_grad()
                 
-                # Clear memory after each batch
+                # Clear memory
                 th.cuda.empty_cache()
         
-        # Report statistics for this cycle
+        # Report statistics
         if num_transitions > 0:
             avg_aux_value_loss = aux_value_loss_sum / num_transitions
             avg_policy_distill_loss = policy_distill_loss_sum / num_transitions
