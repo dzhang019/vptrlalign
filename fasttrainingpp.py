@@ -106,9 +106,10 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             next_obs, env_reward, done, info = env.step(action)
             
             # Calculate custom reward
-            custom_reward, visited_chunks = custom_reward_function(
-                next_obs, done, info, visited_chunks
-            )
+            # custom_reward, visited_chunks = custom_reward_function(
+            #     next_obs, done, info, visited_chunks
+            # )
+            custom_reward = 0
             
             # Apply death penalty if done
             if done:
