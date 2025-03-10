@@ -218,7 +218,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             pending_results = num_envs
             while pending_results > 0:
                 try:
-                    env_id, action, next_obs, done, reward, info = result_queue.get(timeout=5.0)
+                    env_id, action, next_obs, done, reward, info = result_queue.get(timeout=10.0)
                     
                     # Check if this is an episode completion signal
                     if action is None and done and next_obs is None:
