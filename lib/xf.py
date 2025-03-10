@@ -27,7 +27,7 @@ def attention(
     """Fixed attention function that preserves full context"""
     b, t, e = Q_bte.shape
     _, T, _ = K_bTe.shape
-    
+    print(f"attention: Q shape: {Q_bte.shape}, K shape: {K_bTe.shape}, V shape: {V_bTe.shape}")
     # IMPORTANT: Never truncate K/V - always preserve full context window
     # This means we keep T at 128 even in batch mode
     
