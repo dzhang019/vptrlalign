@@ -105,14 +105,14 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
     print(f"[ENV WORKER {env_id}] {time.time():.3f} - Initial observation sent in {queue_put_time:.3f}s")
     
     print(f"[Env {env_id}] Started")
-    
+    action_timeout = 0.01
     step_count = 0
     while not stop_flag.value:
         try:
             # Get action from queue
             queue_get_start = time.time()
             print(f"[ENV WORKER {env_id}] {queue_get_start:.3f} - Waiting for action")
-            action = action_queue.get(timeout=0.1)
+            action = action_queue.get(timeout=action_timeout)
             queue_get_time = time.time() - queue_get_start
             print(f"[ENV WORKER {env_id}] {time.time():.3f} - Got action in {queue_get_time:.3f}s")
             
@@ -178,7 +178,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             print(f"[ENV WORKER {env_id}] {time.time():.3f} - Step {step_count} complete")
                 
         except queue.Empty:
-            print(f"[ENV WORKER {env_id}] {time.time():.3f} - TIMEOUT waiting for action")
+            #print(f"[ENV WORKER {env_id}] {time.time():.3f} - TIMEOUT waiting for action")
             continue
         except Exception as e:
             print(f"[ENV WORKER {env_id}] {time.time():.3f} - Error: {e}")
@@ -302,7 +302,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         # Track timeouts and attempts
         result_get_attempts = 0
         result_get_timeouts = 0
-        
+        result_timeout = 0.01
         while total_transitions < rollout_steps * num_envs:
             # Check if auxiliary phase started during collection
             aux_check_start = time.time()
@@ -318,7 +318,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 result_get_attempts += 1
                 result_get_start = time.time()
                 print(f"[ENV TIMING] {result_get_start:.3f} - Waiting for result #{result_get_attempts} ({total_transitions}/{rollout_steps * num_envs} transitions)")
-                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=0.1)
+                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
                 result_get_time = time.time() - result_get_start
                 print(f"[ENV TIMING] {time.time():.3f} - Got result from env {env_id} in {result_get_time:.3f}s")
                 
@@ -410,7 +410,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                         print(f"[ENV TIMING] [Env {env_id}] {time.time():.3f} - Transition {env_step_counts[env_id]}/{rollout_steps} complete")
             except queue.Empty:
                 result_get_timeouts += 1
-                print(f"[ENV TIMING] {time.time():.3f} - TIMEOUT waiting for results (attempt {result_get_attempts}, timeout #{result_get_timeouts})")
+                #print(f"[ENV TIMING] {time.time():.3f} - TIMEOUT waiting for results (attempt {result_get_attempts}, timeout #{result_get_timeouts})")
                 continue
         
         results_time = time.time() - results_start
