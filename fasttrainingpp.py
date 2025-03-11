@@ -107,7 +107,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             step_start = time.time()
             next_obs, env_reward, done, info = env.step(action)
             step_time = time.time() - step_start
-            print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
+            #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
             
             # Calculate custom reward
