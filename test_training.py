@@ -161,7 +161,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     running_loss = 0.0
     total_steps = 0
     iteration = 0
-    scaler = GradScaler()
+    scaler = th.cuda.amp.GradScaler()
     max_profile_iters = 5  # how many iterations we record
     # with torch.profiler.profile(
     #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
@@ -208,7 +208,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         optimizer.zero_grad()
         
         # Policy loss (using negative log probability * advantages)
-        with autocast(device_type='cuda'):
+        with autocast():
             policy_loss = -(batch_advantages * batch_log_probs).mean()
             
             # Value function loss
