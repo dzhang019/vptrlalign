@@ -868,7 +868,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         phase_coordinator: Coordinator for synchronizing phases between threads
     """
     # Hyperparameters
-    LEARNING_RATE = 2e-5
+    LEARNING_RATE = 8e-6
     MAX_GRAD_NORM = 1.0
     LAMBDA_KL = 10.0
     GAMMA = 0.9999
