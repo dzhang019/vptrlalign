@@ -208,7 +208,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         optimizer.zero_grad()
         
         # Policy loss (using negative log probability * advantages)
-        with autocast():
+        with autocast(device_type='cuda'):
             policy_loss = -(batch_advantages * batch_log_probs).mean()
             
             # Value function loss
