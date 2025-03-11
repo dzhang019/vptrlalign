@@ -77,8 +77,8 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
         # Collect rollouts
         for step in range(rollout_steps):
             for env_i in range(num_envs):
-                if env_i == 0:
-                    envs[env_i].render()
+                #if env_i == 0:
+                 #   envs[env_i].render()
                 
                 if not done_list[env_i]:
                     episode_step_counts[env_i] += 1
@@ -106,7 +106,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["rewards"].append(env_reward_i)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_i])
+                        tree_map(lambda x: x.detach().contiguous(), hidden_states[env_i])
                     )
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
