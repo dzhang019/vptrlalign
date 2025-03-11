@@ -24,7 +24,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
         life_stats = obs["life_stats"]
         if life_stats.get("life", 20) < 10:  # Assuming 20 is max health
             h = life_stats.get("life", 20)
-            lowhealth = 30 * (0.5 * 10/life_stats.get("life", 20))  # Penalty for low health
+            lowhealth = 150 * (0.5 * 10/life_stats.get("life", 20))  # Penalty for low health
             reward -= lowhealth
             print(f"Health at {h}, penalizing by {lowhealth}")
     # Exploration reward: New chunks
