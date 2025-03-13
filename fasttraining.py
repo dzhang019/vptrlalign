@@ -1,4 +1,5 @@
 from argparse import ArgumentParser
+import importlib
 import pickle
 import time
 import threading
@@ -19,7 +20,6 @@ from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
-
 
 th.autograd.set_detect_anomaly(True)
 
@@ -449,10 +449,15 @@ if __name__ == "__main__":
                         help="Size of the queue between environment and training threads")
     parser.add_argument("--temp", type=float, default=2.0, help="Temperature for distillation loss")
     parser.add_argument("--lambda-kl", type=float, default=50.0, help="Weight for KL distillation loss")
+    parser.add_argument("--reward", type=str, default="lib.height",
+                    help="Module name in the lib directory to import reward_function from (e.g., lib.height)")
 
 
     
     args = parser.parse_args()
+    
+    reward_module = importlib.import_module(args.reward)
+    reward_function = reward_module.reward_function
 
     train_rl_threaded(
         in_model=args.in_model,
