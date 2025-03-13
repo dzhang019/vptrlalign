@@ -210,12 +210,13 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             # KL divergence loss - this needs to be handled separately
             kl_losses = []
             for t in transitions_all:
-                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"], T=args.temp)  # args.temp comes from the new argument
                 kl_losses.append(kl_loss)
             kl_loss = th.stack(kl_losses).mean()
+
             
             # Total loss
-            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (args.lambda_kl * kl_loss)
         
         # Backpropagate
         scaler.scale(total_loss).backward()
@@ -443,10 +444,14 @@ if __name__ == "__main__":
     parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
     parser.add_argument("--num-iterations", required=False, type=int, default=10)
     parser.add_argument("--rollout-steps", required=False, type=int, default=40)
-    parser.add_argument("--num-envs", required=False, type=int, default=2)
+    parser.add_argument("--num-envs", required=False, type=int, default=1)
     parser.add_argument("--queue-size", required=False, type=int, default=3,
                         help="Size of the queue between environment and training threads")
+    parser.add_argument("--temp", type=float, default=2.0, help="Temperature for distillation loss")
+    parser.add_argument("--lambda-kl", type=float, default=50.0, help="Weight for KL distillation loss")
 
+
+    
     args = parser.parse_args()
 
     train_rl_threaded(
