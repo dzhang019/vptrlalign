@@ -1,4 +1,5 @@
 from argparse import ArgumentParser
+import importlib
 import pickle
 import time
 import threading
@@ -20,7 +21,6 @@ from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
-
 th.autograd.set_detect_anomaly(True)
 
 
@@ -33,16 +33,28 @@ def load_model_parameters(path_to_model_file):
 
 
 # Simple thread-safe queue for passing rollouts between threads
-# Simple thread-safe queue for passing rollouts between threads
 class RolloutQueue:
     def __init__(self, maxsize=10):
         self.queue = queue.Queue(maxsize=maxsize)
     
-    def put(self, rollouts, block=True, timeout=None):  # Updated signature
-        self.queue.put(rollouts, block=block, timeout=timeout)  # Pass through params
+    def put(self, rollouts, stop_flag, timeout=0.5):
+        while not stop_flag[0]:
+            try:
+                self.queue.put(rollouts, block=True, timeout=timeout)
+                return
+            except queue.Full:
+                if stop_flag[0]:
+                    return
+                continue
     
-    def get(self, block=True, timeout=None):  # For consistency
-        return self.queue.get(block=block, timeout=timeout)
+    def get(self, stop_flag, timeout=0.5):
+        while not stop_flag[0]:
+            try:
+                return self.queue.get(block=True, timeout=timeout)
+            except queue.Empty:
+                if stop_flag[0]:
+                    return None
+        return None
     
     def qsize(self):
         return self.queue.qsize()
@@ -77,8 +89,8 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
         # Collect rollouts
         for step in range(rollout_steps):
             for env_i in range(num_envs):
-                #if env_i == 0:
-                 #   envs[env_i].render()
+                if env_i == 0:
+                    envs[env_i].render()
                 
                 if not done_list[env_i]:
                     episode_step_counts[env_i] += 1
@@ -106,7 +118,7 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                     rollouts[env_i]["rewards"].append(env_reward_i)
                     rollouts[env_i]["dones"].append(done_flag_i)
                     rollouts[env_i]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().contiguous(), hidden_states[env_i])
+                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_i])
                     )
                     rollouts[env_i]["next_obs"].append(next_obs_i)
                     
@@ -123,25 +135,12 @@ def environment_thread(agent, envs, rollout_steps, rollout_queue, out_episodes, 
                         done_list[env_i] = False
                         hidden_states[env_i] = agent.policy.initial_state(batch_size=1)
         
-        # Send the collected rollouts to the training thread with timeout and stop_flag check
+        # Send the collected rollouts to the training thread with stop_flag check
         env_end_time = time.time()
         env_duration = env_end_time - env_start_time
         print(f"[Environment Thread] Iteration {iteration} collected {rollout_steps} steps "
               f"across {num_envs} envs in {env_duration:.3f}s")
-        
-        # Check stop_flag before attempting to put into the queue
-        if stop_flag[0]:
-            break
-        
-        # Attempt to put rollouts into the queue with timeout and stop_flag check
-        while not stop_flag[0]:
-            try:
-                rollout_queue.put(rollouts, block=True, timeout=1)
-                break
-            except queue.Full:
-                continue
-        if stop_flag[0]:
-            break
+        rollout_queue.put(rollouts, stop_flag, timeout=0.5)
 
 
 # Thread for training the agent - updated with batched implementation
@@ -161,21 +160,23 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     running_loss = 0.0
     total_steps = 0
     iteration = 0
-    scaler = th.cuda.amp.GradScaler()
-    max_profile_iters = 5  # how many iterations we record
-    # with torch.profiler.profile(
-    #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-    #     record_shapes=True,
-    #     profile_memory=True,
-    #     with_stack=True
-    # ) as prof:
+    scaler = GradScaler()
+    
     while iteration < num_iterations and not stop_flag[0]:
         iteration += 1
         
-        
         print(f"[Training Thread] Waiting for rollouts...")
         wait_start_time = time.time()
-        rollouts = rollout_queue.get()
+        rollouts = rollout_queue.get(stop_flag, timeout=0.5)
+        if rollouts is None:
+            if stop_flag[0]:
+                print("[Training Thread] Exiting due to stop_flag.")
+                break
+            else:
+                print("[Training Thread] No rollouts available, continuing.")
+                iteration -= 1  # Adjust iteration count since no work was done
+                continue
+        
         wait_end_time = time.time()
         wait_duration = wait_end_time - wait_start_time
         print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
@@ -198,7 +199,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             print(f"[Training Thread] No transitions collected, skipping update.")
             continue
         
-        # OPTIMIZATION: Batch processing instead of individual transition processing
+        # Batch processing
         batch_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in transitions_all])
         batch_returns = th.tensor([t["return"] for t in transitions_all], device="cuda")
         batch_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in transitions_all])
@@ -207,37 +208,30 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         # Compute losses in batch
         optimizer.zero_grad()
         
-        # Policy loss (using negative log probability * advantages)
         with autocast():
             policy_loss = -(batch_advantages * batch_log_probs).mean()
-            
-            # Value function loss
             value_loss = ((batch_v_preds - batch_returns) ** 2).mean()
             
-            # KL divergence loss - this needs to be handled separately
             kl_losses = []
             for t in transitions_all:
-                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"], T=args.temp)
                 kl_losses.append(kl_loss)
             kl_loss = th.stack(kl_losses).mean()
             
-            # Total loss
-            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (LAMBDA_KL * kl_loss)
+            total_loss = policy_loss + (VALUE_LOSS_COEF * value_loss) + (args.lambda_kl * kl_loss)
         
-        # Backpropagate
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
         th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
         scaler.step(optimizer)
         scaler.update()
-        # optimizer.step()
+        
         train_end_time = time.time()
         train_duration = train_end_time - train_start_time
         
         print(f"[Training Thread] Iteration {iteration}/{num_iterations} took {train_duration:.3f}s "
-            f"to process and train on {len(transitions_all)} transitions.")
+              f"to process and train on {len(transitions_all)} transitions.")
         
-        # Update stats
         total_loss_val = total_loss.item()
         running_loss += total_loss_val * len(transitions_all)
         total_steps += len(transitions_all)
@@ -245,20 +239,14 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         LAMBDA_KL *= KL_DECAY
         
         print(f"[Training Thread] Iteration {iteration}/{num_iterations} "
-            f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
-            f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
-            f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
-        # if iteration <= max_profile_iters:
-        #         prof.step()
-        # else:
-        #     # after we've done a few profiled iters, no need to keep calling step
-        #     pass
-    #print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=30))
+              f"Loss={total_loss_val:.4f}, PolicyLoss={policy_loss.item():.4f}, "
+              f"ValueLoss={value_loss.item():.4f}, KLLoss={kl_loss.item():.4f}, "
+              f"StepsSoFar={total_steps}, AvgLoss={avg_loss:.4f}, Queue={rollout_queue.qsize()}")
+
 
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     transitions = []
     T = len(rollout["obs"])
-    # print("sequence length (T): ", T)
     if T == 0:
         return transitions
     
@@ -272,7 +260,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         stochastic=False,
         taken_actions_list=act_seq
     )
-
+    
     old_pi_dist_seq, old_vpred_seq, old_logprob_seq, _ = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
@@ -281,7 +269,6 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     )
 
     for t in range(T):
-        # Create a timestep-specific policy distribution dictionary
         cur_pd_t = {k: v[t] for k, v in pi_dist_seq.items()}
         old_pd_t = {k: v[t] for k, v in old_pi_dist_seq.items()}
         
@@ -292,12 +279,11 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             "done": rollout["dones"][t],
             "v_pred": vpred_seq[t],
             "log_prob": log_prob_seq[t],
-            "cur_pd": cur_pd_t,     # Now a dictionary for this timestep
-            "old_pd": old_pd_t,     # Now a dictionary for this timestep
+            "cur_pd": cur_pd_t,
+            "old_pd": old_pd_t,
             "next_obs": rollout["next_obs"][t]
         })
 
-    # Calculate bootstrap value if needed
     if not transitions[-1]["done"]:
         with th.no_grad():
             hid_t_cpu = rollout["hidden_states"][-1]
@@ -311,8 +297,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         bootstrap_value = v_next.item()
     else:
         bootstrap_value = 0.0
-
-    # GAE calculation
+    
     gae = 0.0
     for i in reversed(range(T)):
         r_i = transitions[i]["reward"]
@@ -338,10 +323,6 @@ def train_rl_threaded(
     num_envs=2,
     queue_size=3
 ):
-    """
-    Minimally modified version with separate threads for environment stepping and training
-    """
-    # Create environments and agents
     dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
@@ -359,16 +340,11 @@ def train_rl_threaded(
     )
     pretrained_policy.load_weights(in_weights)
     
-    # Create environments
     envs = [HumanSurvival(**ENV_KWARGS).make() for _ in range(num_envs)]
     
-    # Create a queue for passing rollouts between threads
     rollout_queue = RolloutQueue(maxsize=queue_size)
-    
-    # Shared flag to signal threads to stop
     stop_flag = [False]
     
-    # Create and start threads
     env_thread = threading.Thread(
         target=environment_thread,
         args=(agent, envs, rollout_steps, rollout_queue, out_episodes, stop_flag)
@@ -384,24 +360,18 @@ def train_rl_threaded(
     train_thread.start()
     
     try:
-        # Wait for training thread to complete
         train_thread.join()
     except KeyboardInterrupt:
         print("Interrupted by user. Stopping threads...")
     finally:
-        # Signal threads to stop
         stop_flag[0] = True
-        
-        # Wait for threads to finish
         env_thread.join(timeout=10)
         if env_thread.is_alive():
             print("Warning: Environment thread did not terminate properly")
         
-        # Close environments
         for env in envs:
             env.close()
         
-        # Save weights
         print(f"Saving fine-tuned weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
 
@@ -414,11 +384,16 @@ if __name__ == "__main__":
     parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
     parser.add_argument("--num-iterations", required=False, type=int, default=10)
     parser.add_argument("--rollout-steps", required=False, type=int, default=40)
-    parser.add_argument("--num-envs", required=False, type=int, default=2)
-    parser.add_argument("--queue-size", required=False, type=int, default=3,
-                        help="Size of the queue between environment and training threads")
-
+    parser.add_argument("--num-envs", required=False, type=int, default=1)
+    parser.add_argument("--queue-size", required=False, type=int, default=3)
+    parser.add_argument("--temp", type=float, default=3.0)
+    parser.add_argument("--lambda-kl", type=float, default=50.0)
+    parser.add_argument("--reward", type=str, default="lib.height")
+    
     args = parser.parse_args()
+    
+    reward_module = importlib.import_module(args.reward)
+    reward_function = reward_module.reward_function
 
     train_rl_threaded(
         in_model=args.in_model,
