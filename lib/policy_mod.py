@@ -18,7 +18,7 @@ from lib.util import FanInInitReLULayer, ResidualRecurrentBlocks
 from lib.misc import transpose
 
 #standalone global kl_loss function
-def compute_kl_loss(current_logits_dict, old_logits_dict):
+def compute_kl_loss(current_logits_dict, old_logits_dict, T=2.0):
     kl_total = 0.0
     num_heads = 0
     for key in current_logits_dict.keys():
@@ -27,13 +27,13 @@ def compute_kl_loss(current_logits_dict, old_logits_dict):
         #print(f"compute_kl_loss: current_logits_dict[{key}].requires_grad: {current_logits.requires_grad}")
         #print(f"compute_kl_loss: old_logits_dict[{key}].requires_grad: {pretrained_logits.requires_grad}")
         kl_loss = F.kl_div(
-            F.log_softmax(current_logits, dim=-1),
-            F.softmax(pretrained_logits, dim=-1),
+            F.log_softmax(current_logits / T, dim=-1),
+            F.softmax(pretrained_logits / T, dim=-1),
             reduction='batchmean'
         )
         kl_total += kl_loss
         num_heads +=1
-    return kl_total / num_heads
+    return (kl_total / num_heads) * ( (T ** 2)
 
 class ImgPreprocessing(nn.Module):
     """Normalize incoming images.
