@@ -2,6 +2,10 @@ if [ ! -f foundation-model-2x.model ]; then
   echo "Error: foundation-model-2x.model not found!"
   exit 1
 fi
+if [ ! -f rl-from-house-2x.weights ]; then
+  echo "Error: rl-from-house-2x.weights not found!"
+  exit 1
+fi
 
 folder="curriculum"
 mkdir "$folder"
