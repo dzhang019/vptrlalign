@@ -1109,13 +1109,13 @@ def train_rl_mp(
         
         # Wait for threads to finish
         print("Waiting for threads to finish...")
-        env_thread.join(timeout=10)
+        env_thread.join(timeout=10) #Might need to change timeout values
         train_thread.join(timeout=5)
         
         # Wait for workers to finish
         print("Waiting for worker processes to finish...")
         for i, p in enumerate(workers):
-            p.join(timeout=5)
+            p.join(timeout=5) # Might need to change this
             if p.is_alive():
                 print(f"Worker {i} did not terminate, force killing...")
                 p.terminate()
