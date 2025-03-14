@@ -551,8 +551,18 @@ if __name__ == "__main__":
     parser.add_argument("--queue-size", type=int, default=3)
     parser.add_argument("--temp", type=float, default=2.0)
     parser.add_argument("--lambda-kl", type=float, default=50.0)
+    parser.add_argument("--reward", type=str, default="lib.phase1", help="Module name to import reward_function from")
+
     args = parser.parse_args()
-    
+    if args.reward != "lib.phase1":
+        try:
+            reward_module = importlib.import_module(args.reward)
+            globals()['reward_function'] = reward_module.reward_function
+            print(f"Successfully imported reward function from {args.reward}")
+        except (ImportError, AttributeError) as e:
+            print(f"Error importing reward function from {args.reward}: {e}")
+            print("Falling back to default reward function")
+
     train_rl_mp(
         args.in_model,
         args.in_weights,
