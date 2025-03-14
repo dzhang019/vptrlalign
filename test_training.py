@@ -579,7 +579,7 @@ if __name__ == "__main__":
     parser.add_argument("--temp", type=float, default=2.0, help="Temperature for distillation loss")
     parser.add_argument("--lambda-kl", type=float, default=50.0, help="Weight for KL distillation loss")
     # Optionally add reward module argument if needed:
-    # parser.add_argument("--reward", type=str, default="lib.phase1", help="Module name to import reward_function from")
+    parser.add_argument("--reward", type=str, default="lib.phase1", help="Module name to import reward_function from")
     
     args = parser.parse_args()
     
