@@ -50,7 +50,7 @@ class CustomHumanSurvival(HumanSurvival):
         ])
         
         # Iron sword reward (+1000 once)
-        self.sword_reward = RewardForCollectingItemsOnce([
+        self.sword_reward = RewardForCollectingItems([
             dict(type="iron_sword", amount=1, reward=1000.0)
         ])
         
