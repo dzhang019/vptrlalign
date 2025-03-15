@@ -17,6 +17,7 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
+
 # Instead of a fixed import for the reward function, you can later dynamically import one if desired.
 # For now we use:
 from lib.phase1 import reward_function
@@ -25,6 +26,7 @@ from lib.phase1 import reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+from minerl.herobraine.hero.handlers import RewardForCollectingItems, RewardForCollectingItemsOnce
 from torch.cuda.amp import autocast, GradScaler
 
 th.autograd.set_detect_anomaly(True)
@@ -37,7 +39,33 @@ def load_model_parameters(path_to_model_file):
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
 
+class CustomHumanSurvival(HumanSurvival):
+    def __init__(self):
+        super().__init__(**ENV_KWARGS)
+        
+        # Tree breaking reward (+1 per log collected)
+        self.log_reward = RewardForCollectingItems([
+            dict(type="log", amount=1, reward=1.0)
+        ])
+        
+        # Iron sword reward (+1000 once)
+        self.sword_reward = RewardForCollectingItemsOnce([
+            dict(type="iron_sword", amount=1, reward=1000.0)
+        ])
+        
+        # Replace existing reward handlers
+        self.reward_handlers = [
+            self.log_reward,
+            self.sword_reward,
+            # Keep other default handlers if needed
+        ]
 
+    def create_observables(self):
+        return super().create_observables() + [
+            # Explicitly include required inventory items
+            ("inventory/log", "log_count"),
+            ("inventory/iron_sword", "sword_count")
+        ]
 # Simple thread-safe queue for passing rollouts between threads
 class RolloutQueue:
     def __init__(self, maxsize=10):
@@ -90,7 +118,7 @@ class PhaseCoordinator:
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     reward_state = None  # Initialize here first
     try:
-        env = HumanSurvival(**ENV_KWARGS).make()
+        env = CustomHumanSurvival().make()
         obs = env.reset()
         # Initialize reward tracking state
         reward_state = None  # Will be initialized in first reward_function call
