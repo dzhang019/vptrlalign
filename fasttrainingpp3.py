@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+import os
+import signal
+import sys
 from argparse import ArgumentParser
 import importlib
 import pickle
@@ -7,6 +10,7 @@ import threading
 import queue
 import multiprocessing as mp
 from multiprocessing import Process, Queue, Value
+from typing import Dict, List, Any
 
 import gym
 import minerl
@@ -14,773 +18,537 @@ import torch as th
 import numpy as np
 
 from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
-from data_loader import DataLoader
 from lib.tree_util import tree_map
-
-# Instead of a fixed import for the reward function, you can later dynamically import one if desired.
-from lib.phase1 import reward_function
-
-# Import our modified compute_kl_loss (which now accepts a temperature T)
 from lib.policy_mod import compute_kl_loss
-from torchvision import transforms
-from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
-th.autograd.set_detect_anomaly(True)
+# Global flag for clean shutdown
+class GracefulExiter:
+    def __init__(self):
+        self.state = Value('b', False)
+        self.lock = threading.Lock()
+    
+    def trigger(self):
+        with self.lock:
+            self.state.value = True
+    
+    def should_exit(self):
+        with self.lock:
+            return self.state.value
 
+exit_controller = GracefulExiter()
 
-def load_model_parameters(path_to_model_file):
-    agent_parameters = pickle.load(open(path_to_model_file, "rb"))
-    policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
-    pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
+def signal_handler(sig, frame):
+    print("\nReceived shutdown signal, initiating graceful exit...")
+    exit_controller.trigger()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# ----------------- Core Functionality -----------------
+def load_model_parameters(path_to_model_file: str) -> tuple:
+    with open(path_to_model_file, "rb") as f:
+        agent_params = pickle.load(f)
+    policy_kwargs = agent_params["model"]["args"]["net"]["args"]
+    pi_head_kwargs = agent_params["model"]["args"]["pi_head_opts"]
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
 
-
-# A thread-safe queue wrapper. We add a get_with_timeout method.
 class RolloutQueue:
     def __init__(self, maxsize=10):
         self.queue = queue.Queue(maxsize=maxsize)
+        self._sentinel = object()
     
-    def put(self, rollouts):
-        self.queue.put(rollouts, block=True)
+    def put(self, rollouts: List[Dict[str, Any]]):
+        try:
+            self.queue.put(rollouts, block=True, timeout=5.0)
+        except queue.Full:
+            print("Warning: RolloutQueue is full, dropping rollout")
     
-    def get(self, timeout=1.0):
-        return self.queue.get(block=True, timeout=timeout)
+    def get(self):
+        try:
+            return self.queue.get(block=True, timeout=1.0)
+        except queue.Empty:
+            raise queue.Empty("No rollouts available")
+    
+    def close(self):
+        self.queue.put(self._sentinel)
     
     def qsize(self):
         return self.queue.qsize()
 
-
-# Phase coordinator for synchronizing policy and auxiliary phases
 class PhaseCoordinator:
     def __init__(self):
         self.lock = threading.Lock()
-        self.is_auxiliary_phase = False
-        self.auxiliary_phase_complete = threading.Event()
+        self.aux_phase_event = threading.Event()
         self.rollout_buffer = []
+        # Set the event initially to allow rollouts
+        self.aux_phase_event.set()
     
     def start_auxiliary_phase(self):
         with self.lock:
-            self.is_auxiliary_phase = True
-            self.auxiliary_phase_complete.clear()
+            self.aux_phase_event.clear()
+            self.rollout_buffer = []
     
     def end_auxiliary_phase(self):
         with self.lock:
-            self.is_auxiliary_phase = False
-            self.auxiliary_phase_complete.set()
+            self.aux_phase_event.set()
     
-    def in_auxiliary_phase(self):
+    def buffer_rollout(self, rollout: Dict[str, Any]):  # Fixed syntax error here
         with self.lock:
-            return self.is_auxiliary_phase
+            if len(self.rollout_buffer) < 5:  # Keep last 5 batches
+                self.rollout_buffer.append(rollout)
     
-    def buffer_rollout(self, rollout):
-        with self.lock:
-            self.rollout_buffer.append(rollout)
-    
-    def get_buffered_rollouts(self):
+    def get_buffered_rollouts(self) -> List[Dict[str, Any]]:
         with self.lock:
             rollouts = self.rollout_buffer
             self.rollout_buffer = []
             return rollouts
-
-
-# Environment worker process (for multiprocessing version)
-def env_worker(env_id, action_queue, result_queue, stop_flag):
-    env = HumanSurvival(**ENV_KWARGS).make()
-    obs = env.reset()
-    visited_chunks = set()
-    episode_step_count = 0
-    print(f"[Env {env_id}] Started")
-    result_queue.put((env_id, None, obs, False, 0, None))
-    action_timeout = 0.01
-    step_count = 0
-    while not stop_flag.value:
-        try:
-            action = action_queue.get(timeout=action_timeout)
-            if action is None:
-                break
-            step_start = time.time()
-            next_obs, env_reward, done, info = env.step(action)
-            step_time = time.time() - step_start
-            step_count += 1
-            # Calculate custom reward using reward_function from lib.phase1
-            custom_reward, visited_chunks = reward_function(next_obs, done, info, visited_chunks)
-            if done:
-                custom_reward -= 2000.0
-            episode_step_count += 1
-            result_queue.put((env_id, action, next_obs, done, custom_reward, info))
-            if env_id == 0:
-                env.render()
-            if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))
-                obs = env.reset()
-                visited_chunks = set()
-                episode_step_count = 0
-                result_queue.put((env_id, None, obs, False, 0, None))
-            else:
-                obs = next_obs
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"[Env {env_id}] Error: {e}")
-    print(f"[Env {env_id}] Processed {step_count} steps")
-    env.close()
-    print(f"[Env {env_id}] Stopped")
-
-
-# Thread for coordinating environments and collecting rollouts
-def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
-                       out_episodes, stop_flag, num_envs, phase_coordinator):
-    obs_list = [None] * num_envs
-    episode_step_counts = [0] * num_envs
-    hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
-    # Wait for initial observations
-    for _ in range(num_envs):
-        try:
-            env_id, _, obs, _, _, _ = result_queue.get(timeout=5.0)
-            obs_list[env_id] = obs
-            print(f"[Environment Thread] Got initial observation from env {env_id}")
-        except queue.Empty:
-            print("[Environment Thread] Timeout waiting for initial observation.")
+    def should_pause(self) -> bool:
+        return not self.aux_phase_event.is_set()
+
+# ----------------- Environment Wrapper -----------------
+# Adding definition for HumanSurvival class
+class HumanSurvival:
+    def __init__(self, **kwargs):
+        self.env_id = "MineRLBasaltFindCave-v0"  # Default environment
+        self.kwargs = kwargs
     
-    iteration = 0
-    while not stop_flag[0]:
-        if phase_coordinator.in_auxiliary_phase():
-            print("[Environment Thread] Pausing collection during auxiliary phase")
-            phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
-            continue
+    def make(self):
+        return gym.make(self.env_id, **self.kwargs)
+
+# ----------------- Environment Management -----------------
+def env_worker(env_id: int, action_queue: Queue, result_queue: Queue, stop_flag: Value):
+    try:
+        env = HumanSurvival(**ENV_KWARGS).make()
+        obs = env.reset()
+        visited_chunks = set()
+        result_queue.put((env_id, None, obs, False, 0.0, None))
         
-        iteration += 1
-        start_time = time.time()
-        rollouts = [{"obs": [], "actions": [], "rewards": [], "dones": [],
-                     "hidden_states": [], "next_obs": []} for _ in range(num_envs)]
-        env_waiting = [False] * num_envs
-        env_step_counts = [0] * num_envs
-        
-        # Send actions to environments
-        for env_id in range(num_envs):
-            if obs_list[env_id] is not None:
-                with th.no_grad():
-                    action_info = agent.get_action_and_training_info(
-                        minerl_obs=obs_list[env_id],
-                        hidden_state=hidden_states[env_id],
-                        stochastic=True,
-                        taken_action=None
-                    )
-                    minerl_action = action_info[0]
-                    new_hid = action_info[-1]
-                hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-                action_queues[env_id].put(minerl_action)
-                env_waiting[env_id] = True
-        
-        total_transitions = 0
-        result_timeout = 0.01
-        while total_transitions < rollout_steps * num_envs and not stop_flag[0]:
+        while not stop_flag.value:
             try:
-                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
-                # Check for episode completion signal
-                if action is None and done and next_obs is None:
-                    with open(out_episodes, "a") as f:
-                        f.write(f"{reward}\n")
-                    continue
-                # Check for observation update without a step
-                if action is None and not done:
-                    obs_list[env_id] = next_obs
-                    continue
-                if env_waiting[env_id]:
-                    rollouts[env_id]["obs"].append(obs_list[env_id])
-                    rollouts[env_id]["actions"].append(action)
-                    rollouts[env_id]["rewards"].append(reward)
-                    rollouts[env_id]["dones"].append(done)
-                    rollouts[env_id]["hidden_states"].append(
-                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id])
-                    )
-                    rollouts[env_id]["next_obs"].append(next_obs)
-                    obs_list[env_id] = next_obs
-                    if done:
-                        hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
-                    env_waiting[env_id] = False
-                    env_step_counts[env_id] += 1
-                    total_transitions += 1
-                    if env_step_counts[env_id] < rollout_steps:
-                        with th.no_grad():
-                            action_info = agent.get_action_and_training_info(
-                                minerl_obs=obs_list[env_id],
-                                hidden_state=hidden_states[env_id],
-                                stochastic=True,
-                                taken_action=None
-                            )
-                            minerl_action = action_info[0]
-                            new_hid = action_info[-1]
-                        hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-                        action_queues[env_id].put(minerl_action)
-                        env_waiting[env_id] = True
+                action = action_queue.get(timeout=0.1)
+                if action is None: break
+                
+                next_obs, _, done, info = env.step(action)
+                custom_reward, visited_chunks = reward_function(next_obs, done, info, visited_chunks)
+                if done: custom_reward -= 2000.0
+                
+                result_queue.put((env_id, action, next_obs, done, custom_reward, info))
+                if done:
+                    obs = env.reset()
+                    visited_chunks = set()
+                    result_queue.put((env_id, None, obs, False, 0.0, None))
+                else:
+                    obs = next_obs
             except queue.Empty:
                 continue
+    except Exception as e:
+        print(f"Env {env_id} crashed: {str(e)}")
+    finally:
+        env.close()
+        print(f"Env {env_id} shutdown complete")
+
+def start_env_workers(num_envs: int) -> tuple:
+    """Start environment worker processes and return queues for communication"""
+    action_queues = []
+    stop_flags = []
+    
+    result_queue = mp.Queue()
+    
+    for i in range(num_envs):
+        action_queue = mp.Queue()
+        stop_flag = Value('b', False)
         
-        # If stopping, break out instead of putting new rollouts
-        if stop_flag[0]:
-            break
+        Process(
+            target=env_worker,
+            args=(i, action_queue, result_queue, stop_flag)
+        ).start()
         
-        rollout_queue.put(rollouts)
-        end_time = time.time()
-        duration = end_time - start_time
-        actual_transitions = sum(len(r["obs"]) for r in rollouts)
-        print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions across {num_envs} envs in {duration:.3f}s")
+        action_queues.append(action_queue)
+        stop_flags.append(stop_flag)
     
-    print("[Environment Thread] Exiting gracefully.")
+    return action_queues, result_queue, stop_flags
 
-
-# Process rollouts into transitions and record old outputs via pretrained_policy
-def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
-    transitions = []
-    T = len(rollout["obs"])
-    if T == 0:
-        return transitions
-    obs_seq = rollout["obs"]
-    act_seq = rollout["actions"]
-    hidden_states_seq = rollout["hidden_states"]
-
-    agent_outputs = agent.get_sequence_and_training_info(
-        minerl_obs_list=obs_seq,
-        initial_hidden_state=hidden_states_seq[0],
-        stochastic=False,
-        taken_actions_list=act_seq
-    )
-    if len(agent_outputs) == 5:
-        pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, _ = agent_outputs
-    else:
-        pi_dist_seq, vpred_seq, log_prob_seq, _ = agent_outputs
-        aux_vpred_seq = None
-
-    old_outputs = pretrained_policy.get_sequence_and_training_info(
-        minerl_obs_list=obs_seq,
-        initial_hidden_state=pretrained_policy.policy.initial_state(1),
-        stochastic=False,
-        taken_actions_list=act_seq
-    )
-    if len(old_outputs) == 5:
-        old_pi_dist_seq, old_vpred_seq, _, old_log_prob_seq, _ = old_outputs
-    else:
-        old_pi_dist_seq, old_vpred_seq, old_log_prob_seq, _ = old_outputs
-
-    for t in range(T):
-        cur_pd_t = {k: v[t] for k, v in pi_dist_seq.items()}
-        old_pd_t = {k: v[t] for k, v in old_pi_dist_seq.items()}
-        transition = {
-            "obs": rollout["obs"][t],
-            "action": rollout["actions"][t],
-            "reward": rollout["rewards"][t],
-            "done": rollout["dones"][t],
-            "v_pred": vpred_seq[t],
-            "log_prob": log_prob_seq[t],
-            "cur_pd": cur_pd_t,
-            "old_pd": old_pd_t,
-            "next_obs": rollout["next_obs"][t]
-        }
-        if aux_vpred_seq is not None:
-            transition["aux_v_pred"] = aux_vpred_seq[t]
-        transitions.append(transition)
-
-    bootstrap_value = 0.0
-    if not transitions[-1]["done"]:
-        with th.no_grad():
-            hid_t_cpu = rollout["hidden_states"][-1]
-            hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
-            action_outputs = agent.get_action_and_training_info(
-                minerl_obs=transitions[-1]["next_obs"],
-                hidden_state=hid_t,
-                stochastic=False,
-                taken_action=None
-            )
-            vpred_index = 2
-            bootstrap_value = action_outputs[vpred_index].item()
-    gae = 0.0
-    for i in reversed(range(T)):
-        r_i = transitions[i]["reward"]
-        v_i = transitions[i]["v_pred"].item()
-        done_i = transitions[i]["done"]
-        mask = 1.0 - float(done_i)
-        next_val = bootstrap_value if i == T - 1 else transitions[i+1]["v_pred"].item()
-        delta = r_i + gamma * next_val * mask - v_i
-        gae = delta + gamma * lam * mask * gae
-        transitions[i]["advantage"] = gae
-        transitions[i]["return"] = gae + v_i
-    return transitions
-
-
-# Helper function for sleep phase
-def get_recent_rollouts(stored_rollouts, max_rollouts=5):
-    recent_rollouts = []
-    for rollout_batch in reversed(stored_rollouts):
-        for env_rollout in rollout_batch:
-            if len(env_rollout["obs"]) > 0:
-                recent_rollouts.append(env_rollout)
-                if len(recent_rollouts) >= max_rollouts:
-                    break
-        if len(recent_rollouts) >= max_rollouts:
-            break
-    recent_rollouts.reverse()
-    print(f"[Training Thread] Selected {len(recent_rollouts)} rollouts for sleep phase")
-    return recent_rollouts
-
-
-# Implementation of the sleep phase (auxiliary phase) for PPG
-def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
-    print("[Sleep Phase] Running auxiliary (sleep) phase")
-    optimizer.zero_grad()
+def rollout_worker(
+    agent: MineRLAgent,
+    action_queues: List[Queue],
+    result_queue: Queue,
+    rollout_queue: RolloutQueue,
+    phase_coord: PhaseCoordinator,
+):
+    """Worker to collect rollouts from environments and feed them to training"""
+    env_states = {}
+    hidden_states = {}
     
-    # Prepare all transitions for the batch update
-    all_transitions = []
-    for rollout in recent_rollouts:
-        if len(rollout["obs"]) == 0:
-            continue
-        
-        # Compute returns and advantages
-        with th.no_grad():
-            obs_seq = rollout["obs"]
-            act_seq = rollout["actions"]
-            hidden_states_seq = rollout["hidden_states"]
-            rewards = rollout["rewards"]
-            dones = rollout["dones"]
-            
-            # Get outputs from the agent
-            agent_outputs = agent.get_sequence_and_training_info(
-                minerl_obs_list=obs_seq,
-                initial_hidden_state=hidden_states_seq[0],
-                stochastic=False,
-                taken_actions_list=act_seq
-            )
-            
-            if len(agent_outputs) == 5:
-                pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, _ = agent_outputs
-            else:
-                pi_dist_seq, vpred_seq, log_prob_seq, _ = agent_outputs
-                aux_vpred_seq = None
+    try:
+        while not exit_controller.should_exit():
+            # Check if we should pause for auxiliary phase
+            if phase_coord.should_pause():
+                time.sleep(0.1)
+                continue
                 
-            # Compute returns (we need this for the auxiliary value head)
-            returns = []
-            next_return = 0.0
-            for t in reversed(range(len(rewards))):
-                next_return = rewards[t] + 0.9999 * next_return * (1.0 - float(dones[t]))
-                returns.insert(0, next_return)
-            returns = th.tensor(returns, device="cuda")
-            
-            # Store transitions with returns
-            for t in range(len(obs_seq)):
-                transition = {
-                    "obs": obs_seq[t],
-                    "action": act_seq[t],
-                    "reward": rewards[t],
-                    "done": dones[t],
-                    "v_pred": vpred_seq[t],
-                    "log_prob": log_prob_seq[t],
-                    "return": returns[t],
-                    "cur_pd": {k: v[t] for k, v in pi_dist_seq.items()}
-                }
-                if aux_vpred_seq is not None:
-                    transition["aux_v_pred"] = aux_vpred_seq[t]
-                all_transitions.append(transition)
-    
-    if not all_transitions:
-        print("[Sleep Phase] No valid transitions for auxiliary phase")
-        return
-    
-    # Compute auxiliary losses
-    batch_size = 128
-    num_epochs = 6
-    aux_value_losses = []
-    joint_kl_losses = []
-    
-    for epoch in range(num_epochs):
-        # Shuffle transitions
-        np.random.shuffle(all_transitions)
-        
-        # Process in batches
-        for start_idx in range(0, len(all_transitions), batch_size):
-            end_idx = min(start_idx + batch_size, len(all_transitions))
-            batch = all_transitions[start_idx:end_idx]
-            
-            # Extract batch data
-            batch_obs = [t["obs"] for t in batch]
-            batch_acts = [t["action"] for t in batch]
-            batch_returns = th.stack([t["return"] for t in batch])
-            batch_old_log_probs = th.stack([t["log_prob"] for t in batch])
-            batch_old_pi_dists = [t["cur_pd"] for t in batch]
-            
-            # Forward pass
-            with autocast():
-                outputs = agent.get_batch_and_training_info(
-                    minerl_obs_list=batch_obs,
-                    taken_actions_list=batch_acts,
-                    initial_hidden_state=None,
-                    stochastic=False
-                )
+            try:
+                env_id, action, obs, done, reward, info = result_queue.get(timeout=0.1)
                 
-                if len(outputs) == 6:
-                    pi_dist_batch, vpred_batch, aux_vpred_batch, log_prob_batch, _, _ = outputs
-                else:
-                    pi_dist_batch, vpred_batch, log_prob_batch, _, _ = outputs
-                    aux_vpred_batch = None
+                # Initialize new environment
+                if action is None:
+                    env_states[env_id] = {"obs": [obs], "actions": [], "rewards": [], "dones": []}
+                    hidden_states[env_id] = agent.policy.initial_state(1)
+                    continue
                 
-                # Compute auxiliary value loss
-                if aux_vpred_batch is not None:
-                    aux_value_loss = ((aux_vpred_batch - batch_returns) ** 2).mean()
-                else:
-                    aux_value_loss = th.tensor(0.0, device="cuda")
+                # Process step
+                env_states[env_id]["obs"].append(obs)
+                env_states[env_id]["actions"].append(action)
+                env_states[env_id]["rewards"].append(reward)
+                env_states[env_id]["dones"].append(done)
                 
-                # Compute KL divergence between current and old policy
-                kl_losses = []
-                for i, (cur_pd, old_pd) in enumerate(zip(pi_dist_batch, batch_old_pi_dists)):
-                    kl_loss = compute_kl_loss(cur_pd, old_pd, T=1.0)
-                    kl_losses.append(kl_loss)
-                joint_kl_loss = th.stack(kl_losses).mean()
+                # Get next action
+                with th.no_grad():
+                    next_action, hidden_states[env_id] = agent.get_action(
+                        obs, hidden_states[env_id]
+                    )
                 
-                # Combined loss
-                total_loss = aux_value_loss + beta_clone * joint_kl_loss
-            
-            # Backward pass
-            scaler.scale(total_loss).backward()
-            
-            # Clip gradients and update
-            scaler.unscale_(optimizer)
-            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            
-            aux_value_losses.append(aux_value_loss.item())
-            joint_kl_losses.append(joint_kl_loss.item())
-    
-    avg_aux_value_loss = sum(aux_value_losses) / len(aux_value_losses) if aux_value_losses else 0.0
-    avg_joint_kl_loss = sum(joint_kl_losses) / len(joint_kl_losses) if joint_kl_losses else 0.0
-    
-    print(f"[Sleep Phase] Completed - Aux Value Loss: {avg_aux_value_loss:.4f}, Joint KL Loss: {avg_joint_kl_loss:.4f}")
+                # Send action to environment
+                action_queues[env_id].put(next_action)
+                
+                # Check if we have enough steps for a rollout
+                if len(env_states[env_id]["actions"]) >= 20:
+                    rollout = {
+                        "obs": env_states[env_id]["obs"][:-1],  # Exclude last obs
+                        "actions": env_states[env_id]["actions"],
+                        "rewards": env_states[env_id]["rewards"],
+                        "dones": env_states[env_id]["dones"],
+                        "hidden_states": [hidden_states[env_id]]
+                    }
+                    rollout_queue.put([rollout])
+                    phase_coord.buffer_rollout(rollout)
+                    
+                    # Reset the buffer but keep the most recent observation
+                    last_obs = env_states[env_id]["obs"][-1]
+                    env_states[env_id] = {"obs": [last_obs], "actions": [], "rewards": [], "dones": []}
+                
+            except queue.Empty:
+                continue
+                
+    except Exception as e:
+        print(f"Rollout worker crashed: {str(e)}")
+    finally:
+        print("Rollout worker shutting down")
 
+# ----------------- Training Core -----------------
+def training_thread(
+    agent: MineRLAgent,
+    pretrained_policy: MineRLAgent,
+    rollout_queue: RolloutQueue,
+    phase_coord: PhaseCoordinator,
+    args: Any
+):
+    # Configuration
+    PPG_CYCLE = 8  # Policy updates per aux phase
+    BATCH_SIZE = 128
+    MAX_GRAD_NORM = 1.0
+    
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=args.learning_rate)
+    scaler = GradScaler()
+    stored_rollouts = []
+    cycle_counter = 0
+    
+    try:
+        while not exit_controller.should_exit() and cycle_counter < args.num_iterations:
+            # ------ Policy Phase ------
+            rollouts = []
+            while len(rollouts) < args.rollout_steps:
+                try:
+                    batch = rollout_queue.get()
+                    if isinstance(batch, list):
+                        rollouts.extend(batch)
+                except queue.Empty:
+                    if exit_controller.should_exit(): break
+                    time.sleep(0.1)
+                    continue
+            
+            # Process rollouts with LwF
+            policy_loss, value_loss, kl_loss = 0.0, 0.0, 0.0
+            for rollout in rollouts:
+                with autocast():
+                    transitions = process_rollout(agent, pretrained_policy, rollout)
+                    losses = update_policy(agent, transitions, optimizer, scaler, args.temp)
+                    policy_loss += losses[0]
+                    value_loss += losses[1]
+                    kl_loss += losses[2]
+            
+            # Store for PPG phase
+            if hasattr(agent.policy, 'aux_value_head'):
+                stored_rollouts.append(rollouts)
+                stored_rollouts = stored_rollouts[-2:]  # Keep last 2 batches
+            
+            # ------ Auxiliary Phase ------
+            if cycle_counter % PPG_CYCLE == 0 and stored_rollouts:
+                phase_coord.start_auxiliary_phase()
+                aux_losses = []
+                
+                for rollout_batch in stored_rollouts:
+                    with autocast():
+                        aux_loss = update_auxiliary(
+                            agent,
+                            rollout_batch,
+                            optimizer,
+                            scaler,
+                            args.temp
+                        )
+                        aux_losses.append(aux_loss)
+                
+                print(f"Aux Phase Loss: {np.mean(aux_losses):.4f}")
+                phase_coord.end_auxiliary_phase()
+                stored_rollouts = []
+                
+            cycle_counter += 1
+            print(f"Cycle {cycle_counter}/{args.num_iterations} completed. " + 
+                  f"Policy Loss: {policy_loss/len(rollouts):.4f}, " +
+                  f"Value Loss: {value_loss/len(rollouts):.4f}, " +
+                  f"KL Loss: {kl_loss/len(rollouts):.4f}")
+            
+    except Exception as e:
+        print(f"Training crash: {str(e)}")
+    finally:
+        print("Saving final model...")
+        th.save(agent.policy.state_dict(), args.out_weights)
 
-# Run policy update (wake phase) with LwF KL loss using temperature scaling.
-def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler, 
-                      value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0, temp=2.0):
-    total_policy_loss = 0.0
-    total_value_loss = 0.0
-    total_kl_loss = 0.0
-    num_valid_envs = 0
-    total_transitions = 0
-
-    optimizer.zero_grad()
-    for env_idx, env_rollout in enumerate(rollouts):
-        if len(env_rollout["obs"]) == 0:
-            print(f"[Policy Update] Environment {env_idx} has no transitions, skipping")
-            continue
-        env_transitions = train_unroll(
-            agent,
-            pretrained_policy,
-            env_rollout,
-            gamma=0.9999,
-            lam=0.95
+def process_rollout(
+    agent: MineRLAgent,
+    pretrained_policy: MineRLAgent,
+    rollout: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    with th.no_grad():
+        agent_out = agent.get_sequence_and_training_info(
+            rollout["obs"],
+            rollout["hidden_states"][0],
+            False,
+            rollout["actions"]
         )
-        if len(env_transitions) == 0:
-            continue
-        env_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) for t in env_transitions])
-        env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
-        env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
-        env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
-        env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
+        pretrained_out = pretrained_policy.get_sequence_and_training_info(
+            rollout["obs"],
+            pretrained_policy.policy.initial_state(1),
+            False,
+            rollout["actions"]
+        )
+    
+    returns = calculate_returns(rollout["rewards"], 0.999)
+    values = agent_out[1]
+    
+    # Calculate advantages
+    advantages = []
+    for ret, val in zip(returns, values):
+        advantages.append(ret - val.item())
+    
+    return [{
+        "obs": obs,
+        "action": act,
+        "cur_logits": cur_logit,
+        "old_logits": old_logit,
+        "value": val,
+        "return": ret,
+        "advantages": adv
+    } for obs, act, cur_logit, old_logit, val, ret, adv in zip(
+        rollout["obs"],
+        rollout["actions"],
+        agent_out[0],
+        pretrained_out[0],
+        agent_out[1],
+        returns,
+        advantages
+    )]
+
+def update_policy(agent, transitions, optimizer, scaler, temp):
+    optimizer.zero_grad()
+    policy_loss, value_loss, kl_loss = 0.0, 0.0, 0.0
+    
+    for batch in chunker(transitions, 128):
+        batch_dict = {}
+        for k in ["obs", "action", "old_logits", "return", "advantages"]:
+            batch_dict[k] = th.stack([item[k] for item in batch]).to("cuda")
+        
         with autocast():
-            policy_loss = -(env_advantages * env_log_probs).mean()
-            value_loss = ((env_v_preds - env_returns) ** 2).mean()
-            kl_losses = []
-            for t in env_transitions:
-                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"], T=temp)
-                kl_losses.append(kl_loss)
-            kl_loss = th.stack(kl_losses).mean()
-            env_loss = policy_loss + (value_loss_coef * value_loss) + (lambda_kl * kl_loss)
-        scaler.scale(env_loss).backward()
-        total_policy_loss += policy_loss.item()
-        total_value_loss += value_loss.item()
-        total_kl_loss += kl_loss.item()
-        num_valid_envs += 1
-        total_transitions += len(env_transitions)
-    if num_valid_envs == 0:
-        print("[Policy Update] No valid transitions, skipping update")
-        return 0.0, 0.0, 0.0, 0
+            dist = agent.policy.get_distribution(batch_dict["obs"])
+            log_probs = dist.log_prob(batch_dict["action"])
+            
+            # LwF Component
+            kl = compute_kl_loss(
+                dist.probs, 
+                th.softmax(batch_dict["old_logits"] / temp, dim=-1)
+            )
+            
+            # Value loss
+            value_pred = agent.policy.value(batch_dict["obs"])
+            v_loss = th.mean((value_pred - batch_dict["return"]) ** 2)
+            
+            # Combined loss
+            loss = -th.mean(log_probs * batch_dict["advantages"]) + v_loss + kl
+            
+        scaler.scale(loss).backward()
+        policy_loss += loss.item()
+        value_loss += v_loss.item()
+        kl_loss += kl.item()
+    
     scaler.unscale_(optimizer)
-    th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
+    th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
     scaler.step(optimizer)
     scaler.update()
-    avg_policy_loss = total_policy_loss / num_valid_envs
-    avg_value_loss = total_value_loss / num_valid_envs
-    avg_kl_loss = total_kl_loss / num_valid_envs
-    return avg_policy_loss, avg_value_loss, avg_kl_loss, total_transitions
-
-
-# Training thread that handles both policy (wake) and auxiliary (sleep) phases.
-def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator, args):
-    LEARNING_RATE = 3e-7
-    MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = args.lambda_kl
-    GAMMA = 0.9999
-    LAM = 0.95
-    VALUE_LOSS_COEF = 0.5
-    KL_DECAY = 0.9995
-    PPG_ENABLED = True
-    PPG_N_PI_UPDATES = 8
-    PPG_BETA_CLONE = 1.0
-
-    # Create optimizer with learning rate scheduler
-    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
-    scheduler = th.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=num_iterations,
-        eta_min=LEARNING_RATE * 0.1
-    )
     
-    running_loss = 0.0
-    total_steps = 0
-    iteration = 0
-    scaler = GradScaler()
+    return policy_loss, value_loss, kl_loss
     
-    pi_update_counter = 0
-    stored_rollouts = []
-    has_aux_head = hasattr(agent.policy, 'aux_value_head')
-    if has_aux_head:
-        print("[Training Thread] Detected auxiliary value head, enabling PPG")
-    else:
-        print("[Training Thread] No auxiliary value head detected, PPG will be disabled")
-        PPG_ENABLED = False
-
-    while iteration < num_iterations and not stop_flag[0]:
-        iteration += 1
-        do_aux_phase = (PPG_ENABLED and has_aux_head and 
-                        pi_update_counter >= PPG_N_PI_UPDATES and 
-                        len(stored_rollouts) > 0)
-        if do_aux_phase:
-            phase_coordinator.start_auxiliary_phase()
-            print(f"[Training Thread] Starting auxiliary (sleep) phase (iteration {iteration})")
-            recent_rollouts = get_recent_rollouts(stored_rollouts, max_rollouts=5)
-            run_sleep_phase(
-                agent=agent,
-                recent_rollouts=recent_rollouts,
-                optimizer=optimizer,
-                scaler=scaler,
-                max_grad_norm=MAX_GRAD_NORM,
-                beta_clone=PPG_BETA_CLONE
-            )
-            phase_coordinator.end_auxiliary_phase()
-            print("[Training Thread] Auxiliary phase complete")
-            buffered_rollouts = phase_coordinator.get_buffered_rollouts()
-            if buffered_rollouts:
-                print(f"[Training Thread] Processing {len(buffered_rollouts)} buffered rollouts")
-                for rollout in buffered_rollouts:
-                    rollout_queue.put(rollout)
-            pi_update_counter = 0
-            stored_rollouts = []
-            th.cuda.empty_cache()
-        else:
-            pi_update_counter += 1
-            print(f"[Training Thread] Policy phase {pi_update_counter}/{PPG_N_PI_UPDATES} - Waiting for rollouts...")
-            try:
-                rollouts = rollout_queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-            # Check for sentinel to end loop
-            if rollouts is None:
-                break
-            if PPG_ENABLED and has_aux_head:
-                stored_rollouts.append(rollouts)
-                if len(stored_rollouts) > 2:
-                    stored_rollouts = stored_rollouts[-2:]
-            train_start = time.time()
-            print(f"[Training Thread] Processing rollouts for iteration {iteration}")
-            avg_policy_loss, avg_value_loss, avg_kl_loss, num_transitions = run_policy_update(
-                agent=agent,
-                pretrained_policy=pretrained_policy,
-                rollouts=rollouts,
-                optimizer=optimizer,
-                scaler=scaler,
-                value_loss_coef=VALUE_LOSS_COEF,
-                lambda_kl=LAMBDA_KL,
-                max_grad_norm=MAX_GRAD_NORM,
-                temp=args.temp
-            )
-            train_duration = time.time() - train_start
-            print(f"[Training Thread] Policy Phase {pi_update_counter}/{PPG_N_PI_UPDATES} - Time: {train_duration:.3f}s, Transitions: {num_transitions}, "
-                  f"PolicyLoss: {avg_policy_loss:.4f}, ValueLoss: {avg_value_loss:.4f}, KLLoss: {avg_kl_loss:.4f}")
-            running_loss += (avg_policy_loss + avg_value_loss + avg_kl_loss) * num_transitions
-            total_steps += num_transitions
-            LAMBDA_KL *= KL_DECAY
-            scheduler.step()
+def update_auxiliary(agent, rollouts, optimizer, scaler, temp):
+    aux_loss = 0.0
+    for rollout in rollouts:
+        transitions = process_rollout(agent, agent, rollout)  # Using agent as both current and pretrained
+        
+        for batch in chunker(transitions, 128):
+            batch_dict = {}
+            for k in ["obs", "old_logits", "return"]:
+                batch_dict[k] = th.stack([item[k] for item in batch]).to("cuda")
             
-            # Implement model saving every 5 iterations
-            if iteration % 5 == 0:
-                checkpoint_path = f"{args.out_weights}.iter{iteration}"
-                print(f"[Training Thread] Saving checkpoint to {checkpoint_path}")
-                th.save(agent.policy.state_dict(), checkpoint_path)
+            optimizer.zero_grad()
+            with autocast():
+                # Auxiliary value update
+                aux_values = agent.policy.aux_value(batch_dict["obs"])
+                v_loss = th.mean((aux_values - batch_dict["return"]) ** 2)
                 
-    print("[Training Thread] Exiting gracefully.")
+                # Policy distillation component
+                dist = agent.policy.get_distribution(batch_dict["obs"])
+                kl = compute_kl_loss(
+                    dist.probs,
+                    th.softmax(batch_dict["old_logits"] / temp, dim=-1)
+                )
+                
+                loss = v_loss + kl
+                
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            th.nn.utils.clip_grad_norm_(agent.policy.parameters(), MAX_GRAD_NORM)
+            scaler.step(optimizer)
+            scaler.update()
+            
+            aux_loss += loss.item()
+    
+    return aux_loss / (len(rollouts) * len(batch))
 
+# ----------------- Utilities -----------------
+def calculate_returns(rewards: List[float], gamma: float) -> List[float]:
+    returns = []
+    R = 0.0
+    for r in reversed(rewards):
+        R = r + gamma * R
+        returns.insert(0, R)
+    return returns
 
-# Multiprocessing version: train_rl_mp
-def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
-                num_iterations=10, rollout_steps=40, num_envs=2, queue_size=3, args=None):
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        print("Multiprocessing start method already set")
-    
-    dummy_env = HumanSurvival(**ENV_KWARGS).make()
-    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-    
-    agent = MineRLAgent(
-        dummy_env, device="cuda",
-        policy_kwargs=agent_policy_kwargs,
-        pi_head_kwargs=agent_pi_head_kwargs
-    )
-    agent.load_weights(in_weights)
-    
-    pretrained_policy = MineRLAgent(
-        dummy_env, device="cuda",
-        policy_kwargs=agent_policy_kwargs,
-        pi_head_kwargs=agent_pi_head_kwargs
-    )
-    pretrained_policy.load_weights(in_weights)
-    
-    # Add observation normalization
-    def normalize_obs(obs):
-        # Normalize image observations
-        if "pov" in obs:
-            obs["pov"] = obs["pov"].astype(np.float32) / 255.0
-        return obs
-    
-    phase_coordinator = PhaseCoordinator()
-    stop_flag = mp.Value('b', False)
-    action_queues = [Queue() for _ in range(num_envs)]
-    result_queue = Queue()
-    rollout_queue = RolloutQueue(maxsize=queue_size)
-    
-    workers = []
-    for env_id in range(num_envs):
-        p = Process(
-            target=env_worker,
-            args=(env_id, action_queues[env_id], result_queue, stop_flag)
-        )
-        p.daemon = True
-        p.start()
-        workers.append(p)
-        time.sleep(0.4)
-    
-    thread_stop = [False]
-    env_thread = threading.Thread(
-        target=environment_thread,
-        args=(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
-              out_episodes, thread_stop, num_envs, phase_coordinator)
-    )
-    train_thread = threading.Thread(
-        target=training_thread,
-        args=(agent, pretrained_policy, rollout_queue, thread_stop, num_iterations, phase_coordinator, args)
-    )
-    
-    # Add tensorboard logging
-    try:
-        from torch.utils.tensorboard import SummaryWriter
-        log_dir = f"./logs/{time.strftime('%Y%m%d-%H%M%S')}"
-        writer = SummaryWriter(log_dir)
-        print(f"Tensorboard logging enabled. Run 'tensorboard --logdir={log_dir}' to view metrics.")
-    except ImportError:
-        writer = None
-        print("Tensorboard not available. Install with 'pip install tensorboard' for metric visualization.")
-    
-    print("Starting threads...")
-    env_thread.start()
-    train_thread.start()
-    
-    try:
-        train_thread.join()
-    except KeyboardInterrupt:
-        print("Interrupted by user, stopping threads and processes...")
-    finally:
-        print("Setting stop flag...")
-        thread_stop[0] = True
-        stop_flag.value = True
-        # Signal environment workers to exit
-        for q in action_queues:
-            try:
-                q.put(None)
-            except Exception as e:
-                print(f"Error putting termination signal: {e}")
-        # Signal training thread by inserting sentinel into rollout queue
-        try:
-            rollout_queue.put(None)
-        except:
-            pass
-        print("Waiting for threads to finish...")
-        env_thread.join(timeout=10)
-        train_thread.join(timeout=10)
-        print("Waiting for worker processes to finish...")
-        for i, p in enumerate(workers):
-            p.join(timeout=5)
-            if p.is_alive():
-                print(f"Worker {i} did not terminate, force killing...")
-                p.terminate()
-        dummy_env.close()
-        print(f"Saving weights to {out_weights}")
-        th.save(agent.policy.state_dict(), out_weights)
-        if writer:
-            writer.close()
+def chunker(seq: List[Any], size: int) -> List[List[Any]]:
+    """Split a list into chunks of specified size"""
+    return [seq[pos:pos + size] for pos in range(0, len(seq), size)]
 
+# ----------------- Default reward function -----------------
+def default_reward_function(obs, done, info, visited_chunks):
+    """Default reward function if lib.phase1 is not available"""
+    # Extract player position
+    if 'location_stats' in info and 'xpos' in info['location_stats'] and 'zpos' in info['location_stats']:
+        x_pos = info['location_stats']['xpos']
+        z_pos = info['location_stats']['zpos']
+        
+        # Calculate chunk coordinates (16x16 blocks per chunk)
+        chunk_x = int(x_pos) // 16
+        chunk_z = int(z_pos) // 16
+        chunk_key = (chunk_x, chunk_z)
+        
+        # Reward for exploring new chunks
+        if chunk_key not in visited_chunks:
+            visited_chunks.add(chunk_key)
+            return 10.0, visited_chunks
+    
+    # Small default reward for staying alive
+    return 0.1, visited_chunks
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--in-model", required=True, type=str)
-    parser.add_argument("--in-weights", required=True, type=str)
-    parser.add_argument("--out-weights", required=True, type=str)
-    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
-    parser.add_argument("--num-iterations", required=False, type=int, default=10)
-    parser.add_argument("--rollout-steps", required=False, type=int, default=40)
-    parser.add_argument("--num-envs", required=False, type=int, default=4)
-    parser.add_argument("--queue-size", required=False, type=int, default=3,
-                        help="Size of the queue between environment and training threads")
-    parser.add_argument("--temp", type=float, default=2.0, help="Temperature for distillation loss")
-    parser.add_argument("--lambda-kl", type=float, default=50.0, help="Weight for KL distillation loss")
-    parser.add_argument("--reward", type=str, default="lib.phase1", help="Module name to import reward_function from")
-    parser.add_argument("--log-interval", type=int, default=1, help="Log stats every N iterations")
-    parser.add_argument("--save-interval", type=int, default=5, help="Save checkpoint every N iterations")
-    parser.add_argument("--cuda-device", type=int, default=0, help="CUDA device index to use")
-    
+    parser.add_argument("--in-model", required=True)
+    parser.add_argument("--in-weights", required=True)
+    parser.add_argument("--out-weights", required=True)
+    parser.add_argument("--num-iterations", type=int, default=100)
+    parser.add_argument("--rollout-steps", type=int, default=80)
+    parser.add_argument("--temp", type=float, default=2.0)
+    parser.add_argument("--learning-rate", type=float, default=3e-7)
+    parser.add_argument("--num-envs", type=int, default=11)
     args = parser.parse_args()
-    
-    # Set CUDA device
-    th.cuda.set_device(args.cuda_device)
-    
-    # Dynamic reward import
-    if args.reward != "lib.phase1":
-        try:
-            reward_module = importlib.import_module(args.reward)
-            globals()['reward_function'] = reward_module.reward_function
-            print(f"Successfully imported reward function from {args.reward}")
-        except (ImportError, AttributeError) as e:
-            print(f"Error importing reward function from {args.reward}: {e}")
-            print("Falling back to default reward function")
 
-    # Print config
-    print("Configuration:")
-    for arg in vars(args):
-        print(f"  {arg}: {getattr(args, arg)}")
+    # Dynamic reward function handling
+    try:
+        from lib.phase1 import reward_function
+        print("Using custom reward function from lib.phase1")
+    except ImportError:
+        print("Custom reward function not found. Using default reward function.")
+        reward_function = default_reward_function
+
+    # Initialize systems
+    policy_kwargs, pi_head_kwargs = load_model_parameters(args.in_model)
+    env = HumanSurvival(**ENV_KWARGS).make()
     
-    weights = th.load(args.in_weights, map_location="cpu")
-    has_aux_head = any('aux' in key for key in weights.keys())
-    print(f"Model weights {'have' if has_aux_head else 'do not have'} auxiliary value head keys")
+    agent = MineRLAgent(env, device="cuda",
+                       policy_kwargs=policy_kwargs,
+                       pi_head_kwargs=pi_head_kwargs)
+    agent.load_weights(args.in_weights)
     
-    train_rl_mp(
-        in_model=args.in_model,
-        in_weights=args.in_weights,
-        out_weights=args.out_weights,
-        out_episodes=args.out_episodes,
-        num_iterations=args.num_iterations,
-        rollout_steps=args.rollout_steps,
-        num_envs=args.num_envs,
-        queue_size=args.queue_size,
-        args=args
+    pretrained = MineRLAgent(env, device="cuda",
+                            policy_kwargs=policy_kwargs,
+                            pi_head_kwargs=pi_head_kwargs)
+    pretrained.load_weights(args.in_weights)
+    
+    # Start training ecosystem
+    rollout_queue = RolloutQueue()
+    phase_coord = PhaseCoordinator()
+    
+    # Start environment workers
+    action_queues, result_queue, stop_flags = start_env_workers(args.num_envs)
+    
+    # Start rollout worker
+    rollout_thread = threading.Thread(
+        target=rollout_worker,
+        args=(agent, action_queues, result_queue, rollout_queue, phase_coord)
     )
+    rollout_thread.start()
+    
+    # Start training thread
+    train_thread = threading.Thread(
+        target=training_thread,
+        args=(agent, pretrained, rollout_queue, phase_coord, args)
+    )
+    train_thread.start()
+    
+    try:
+        # Main thread just monitors for exit signal
+        while not exit_controller.should_exit():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Shutting down...")
+        exit_controller.trigger()
+    finally:
+        # Clean shutdown
+        print("Initiating clean shutdown...")
+        exit_controller.trigger()
+        
+        # Close queues
+        rollout_queue.close()
+        
+        # Wait for threads to finish
+        train_thread.join(timeout=30)
+        rollout_thread.join(timeout=30)
+        
+        # Signal worker processes to stop
+        for i, stop_flag in enumerate(stop_flags):
+            with stop_flag.get_lock():
+                stop_flag.value = True
+                action_queues[i].put(None)  # Send sentinel to unblock get() calls
+        
+        # Close environment
+        env.close()
+        print("Shutdown complete.")
