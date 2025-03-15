@@ -115,27 +115,19 @@ class PhaseCoordinator:
 # ----------------- Environment Wrapper -----------------
 class HumanSurvival:
     def __init__(self, **kwargs):
-        # Use the correct Basalt environment name
-        self.env_id = "MineRLBasaltMakeWaterfall-v0"
-        
-        # Basalt environments use different configuration
+        # Use standard MineRL environment
+        self.env_id = "MineRLObtainDiamond-v0"  # Regular MineRL environment
         self.kwargs = {
-            'config': {
-                'enableCamera': True,
-                'cameraMode': 'third',
-                'cameraOffset': (2, 0, 0)
-            }
+            'fovRange': [70, 70],  # Valid parameter for regular MineRL
+            'gammaRange': [2, 2],
+            'texturePack': "default",
+            'renderResolution': 128
         }
         self.kwargs.update(kwargs)
     
     def make(self):
-        # Basalt environments need special handling
-        env = gym.make(self.env_id)
+        return gym.make(self.env_id, **self.kwargs)
         
-        # Set camera parameters through action space
-        env = wrap_env(env)
-        return env
-
 def wrap_env(env):
     # Set up observation space modifications
     from minerl.env import spaces
