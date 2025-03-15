@@ -88,78 +88,72 @@ class PhaseCoordinator:
 
 # Environment worker process (for multiprocessing version)
 def env_worker(env_id, action_queue, result_queue, stop_flag):
-    # Create environment
-    env = HumanSurvival(**ENV_KWARGS).make()
-    
-    # Initialize
-    obs = env.reset()
-    visited_chunks = set()
-    episode_step_count = 0
-    
+    reward_state = None  # Initialize here first
+    try:
+        env = HumanSurvival(**ENV_KWARGS).make()
+        obs = env.reset()
+        # Initialize reward tracking state
+        reward_state = None  # Will be initialized in first reward_function call
+        timestep = 0
+    except Exception as e:
+        print(f"[Env {env_id}] Error during setup: {e}")
+        env.close() if 'env' in locals() else None
+        return
+
     print(f"[Env {env_id}] Started")
-    
-    # Send initial observation to main process
-    result_queue.put((env_id, None, obs, False, 0, None))
-    
-    action_timeout = 0.01
-    step_count = 0
-    while not stop_flag.value:
-        try:
-            # Get action from queue
-            action = action_queue.get(timeout=action_timeout)
-            
-            if action is None:  # Signal to terminate
-                break
-                
-            # Step environment
-            step_start = time.time()
-            next_obs, env_reward, done, info = env.step(action)
-            step_time = time.time() - step_start
-            #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
-            step_count += 1
-            
-            # Calculate custom reward
+    try:
+        # Send initial observation
+        result_queue.put((env_id, None, obs, False, 0, None))
+        
+        while not stop_flag.value:
             try:
-                custom_reward, reward_state, timestep = reward_function(
+                action = action_queue.get(timeout=0.01)
+                if action is None:
+                    break
+
+                next_obs, env_reward, done, info = env.step(action)
+                
+                # Initialize reward_state if first step
+                if reward_state is None:
+                    reward_state = {
+                        'prev_logs': 0,
+                        'has_sword': False,
+                        'given_sword_reward': False
+                    }
+                
+                # Calculate custom reward
+                custom_reward, new_reward_state, new_timestep = reward_function(
                     current_state=next_obs,
                     prev_state=reward_state,
                     timestep=timestep
                 )
-            except KeyError as e:
-                print(f"⚠️ Missing inventory key {e}, resetting reward state")
-                reward_state = None
-                custom_reward = 0
-            
-            # Apply death penalty if done
-            if done:
-                custom_reward -= 2000.0
+                reward_state = new_reward_state
+                timestep = new_timestep
+
+                result_queue.put((env_id, action, next_obs, done, custom_reward, info))
                 
-            # Increment step count
-            episode_step_count += 1
-            
-            # Send results back
-            result_queue.put((env_id, action, next_obs, done, custom_reward, info))
-            if env_id == 0:
-                env.render()
-            # Reset if episode is done
-            if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
+                if done:
+                    # Reset reward tracking on episode end
+                    reward_state = None
+                    obs = env.reset()
+                    timestep = 0
+                    result_queue.put((env_id, None, obs, False, 0, None))
+                else:
+                    obs = next_obs
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[Env {env_id}] Error in step: {e}")
+                # Reset environment on critical error
                 obs = env.reset()
-                visited_chunks = set()
-                episode_step_count = 0
-                result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
-            else:
-                obs = next_obs
-                
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"[Env {env_id}] Error: {e}")
-            
-    # Clean up
-    print(f"[Env {env_id}] Processed {step_count} steps")
-    env.close()
-    print(f"[Env {env_id}] Stopped")
+                reward_state = None
+                timestep = 0
+                result_queue.put((env_id, None, obs, False, 0, None))
+
+    finally:
+        env.close()
+        print(f"[Env {env_id}] Stopped")
 
 
 # Thread for coordinating environments and collecting rollouts
