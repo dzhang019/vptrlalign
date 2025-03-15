@@ -110,11 +110,20 @@ class PhaseCoordinator:
         return not self.aux_phase_event.is_set()
 
 # ----------------- Environment Wrapper -----------------
-# Adding definition for HumanSurvival class
+# Adding definition for Survival class
+# ----------------- Environment Wrapper -----------------
 class HumanSurvival:
     def __init__(self, **kwargs):
-        self.env_id = "MineRLBasaltFindCave-v0"  # Default environment
-        self.kwargs = kwargs
+        # Use the actual MineRL human survival environment
+        self.env_id = "MineRLBasaltMakeWaterfall-v0"  # Verified compatible environment
+        self.kwargs = {
+            'fov': 90,         # Valid FOV setting instead of fov_range
+            'gamma': 2.2,      # Standard MineRL video settings
+            'brightness': 1.0,
+            'render_resolution': 128  # Reduced for better performance
+        }
+        # Merge with any provided kwargs
+        self.kwargs.update(kwargs)
     
     def make(self):
         return gym.make(self.env_id, **self.kwargs)
