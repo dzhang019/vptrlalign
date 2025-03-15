@@ -46,12 +46,16 @@ ACTION_TRANSFORMER_KWARGS = dict(
 )
 
 # Valid MineRL environment parameters
-ENV_KWARGS = {
-    'fovRange': [70, 70],
-    'gammaRange': [2, 2],
-    'texturePack': "default",
-    'renderResolution': 128
-}
+
+ENV_KWARGS = dict(
+    fov_range=[70, 70],
+    frameskip=1,
+    gamma_range=[2, 2],
+    guiscale_range=[1, 1],
+    resolution=[640, 360],
+    cursor_size_range=[16.0, 16.0],
+)
+
 TARGET_ACTION_SPACE = {
     "ESC": spaces.Discrete(2),
     "attack": spaces.Discrete(2),
