@@ -112,21 +112,45 @@ class PhaseCoordinator:
 # ----------------- Environment Wrapper -----------------
 # Adding definition for Survival class
 # ----------------- Environment Wrapper -----------------
+# ----------------- Environment Wrapper -----------------
 class HumanSurvival:
     def __init__(self, **kwargs):
-        # Use the actual MineRL human survival environment
-        self.env_id = "MineRLBasaltMakeWaterfall-v0"  # Verified compatible environment
+        # Use the correct Basalt environment name
+        self.env_id = "MineRLBasaltMakeWaterfall-v0"
+        
+        # Basalt environments use different configuration
         self.kwargs = {
-            'fov': 90,         # Valid FOV setting instead of fov_range
-            'gamma': 2.2,      # Standard MineRL video settings
-            'brightness': 1.0,
-            'render_resolution': 128  # Reduced for better performance
+            'config': {
+                'enableCamera': True,
+                'cameraMode': 'third',
+                'cameraOffset': (2, 0, 0)
+            }
         }
-        # Merge with any provided kwargs
         self.kwargs.update(kwargs)
     
     def make(self):
-        return gym.make(self.env_id, **self.kwargs)
+        # Basalt environments need special handling
+        env = gym.make(self.env_id)
+        
+        # Set camera parameters through action space
+        env = wrap_env(env)
+        return env
+
+def wrap_env(env):
+    # Set up observation space modifications
+    from minerl.env import spaces
+    env.observation_space = spaces.Dict({
+        **env.observation_space.spaces,
+        'pov': spaces.Box(low=0, high=255, shape=(128, 128, 3),  # Set resolution
+    })
+    
+    # Set default FOV through action
+    env.reset()
+    env.step({
+        'camera': [0, 0],  # Set initial camera position
+        'fov': 90          # Set FOV through action
+    })
+    return env
 
 # ----------------- Environment Management -----------------
 def env_worker(env_id: int, action_queue: Queue, result_queue: Queue, stop_flag: Value):
