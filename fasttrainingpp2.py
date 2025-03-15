@@ -27,6 +27,7 @@ from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from minerl.herobraine.hero.handlers import RewardForCollectingItems, RewardForCollectingItemsOnce
+from minerl.herobraine.hero import handlers
 from torch.cuda.amp import autocast, GradScaler
 
 th.autograd.set_detect_anomaly(True)
