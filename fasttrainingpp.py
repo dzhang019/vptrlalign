@@ -111,7 +111,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             step_count += 1
             
             # Calculate custom reward
-            custom_reward, visited_chunks = custom_reward_function(
+            custom_reward, visited_chunks = reward_function(
                 next_obs, done, info, visited_chunks
             )
             
