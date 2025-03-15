@@ -131,16 +131,18 @@ class HumanSurvival:
 def wrap_env(env):
     # Set up observation space modifications
     from minerl.env import spaces
+    
+    # Corrected Box definition with closing parenthesis
     env.observation_space = spaces.Dict({
         **env.observation_space.spaces,
-        'pov': spaces.Box(low=0, high=255, shape=(128, 128, 3),  # Set resolution
+        'pov': spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8)
     })
     
     # Set default FOV through action
     env.reset()
     env.step({
-        'camera': [0, 0],  # Set initial camera position
-        'fov': 90          # Set FOV through action
+        'camera': np.array([0, 0], dtype=np.float32),  # Proper numpy array
+        'fov': np.array(90, dtype=np.float32)
     })
     return env
 
