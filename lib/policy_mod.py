@@ -18,22 +18,22 @@ from lib.util import FanInInitReLULayer, ResidualRecurrentBlocks
 from lib.misc import transpose
 
 #standalone global kl_loss function
-def compute_kl_loss(current_logits_dict, old_logits_dict):
+def compute_kl_loss(current_logits_dict, old_logits_dict, T=2.0):
     kl_total = 0.0
     num_heads = 0
     for key in current_logits_dict.keys():
         current_logits = current_logits_dict[key]
         pretrained_logits = old_logits_dict[key]
-        #print(f"compute_kl_loss: current_logits_dict[{key}].requires_grad: {current_logits.requires_grad}")
-        #print(f"compute_kl_loss: old_logits_dict[{key}].requires_grad: {pretrained_logits.requires_grad}")
+        # Scale the logits by T and then multiply the loss by T^2.
         kl_loss = F.kl_div(
-            F.log_softmax(current_logits, dim=-1),
-            F.softmax(pretrained_logits, dim=-1),
+            F.log_softmax(current_logits / T, dim=-1),
+            F.softmax(pretrained_logits / T, dim=-1),
             reduction='batchmean'
-        )
+        ) * (T * T)
         kl_total += kl_loss
-        num_heads +=1
+        num_heads += 1
     return kl_total / num_heads
+
 def compute_kl_loss_debug(current_logits_dict, old_logits_dict, debug_tag=""):
     kl_total = 0.0
     num_heads = 0
