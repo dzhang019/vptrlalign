@@ -47,11 +47,10 @@ ACTION_TRANSFORMER_KWARGS = dict(
 
 # Valid MineRL environment parameters
 ENV_KWARGS = {
-    'fov': 90,
-    'gamma': 2.2,
-    'brightness': 1.0,
-    'render_resolution': 128,
-    'gui_scale': 2
+    'config': {
+        'enableCamera': True,
+        'cameraMode': 'third'
+    }
 }
 TARGET_ACTION_SPACE = {
     "ESC": spaces.Discrete(2),
