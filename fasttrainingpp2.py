@@ -88,7 +88,18 @@ class PhaseCoordinator:
 
 # Environment worker process (for multiprocessing version)
 def env_worker(env_id, action_queue, result_queue, stop_flag):
-    env = HumanSurvival(**ENV_KWARGS).make()
+    def env_worker(env_id, action_queue, result_queue, stop_flag):
+    try:
+        env = HumanSurvival(**ENV_KWARGS).make()
+    except Exception as e:
+        print(f"[Env {env_id}] Error creating environment: {e}")
+        return
+    try:
+        obs = env.reset()
+    except Exception as e:
+        print(f"[Env {env_id}] Error during reset: {e}")
+        env.close()
+        return
     obs = env.reset()
     # Initialize reward tracking state and timestep counter.
     reward_state = None  
