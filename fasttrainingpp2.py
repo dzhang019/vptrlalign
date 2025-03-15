@@ -88,7 +88,6 @@ class PhaseCoordinator:
 
 # Environment worker process (for multiprocessing version)
 def env_worker(env_id, action_queue, result_queue, stop_flag):
-    def env_worker(env_id, action_queue, result_queue, stop_flag):
     try:
         env = HumanSurvival(**ENV_KWARGS).make()
     except Exception as e:
