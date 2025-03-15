@@ -90,8 +90,9 @@ class PhaseCoordinator:
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     env = HumanSurvival(**ENV_KWARGS).make()
     obs = env.reset()
-    visited_chunks = set()
-    episode_step_count = 0
+    # Initialize reward tracking state and timestep counter.
+    reward_state = None  
+    timestep = 0
     print(f"[Env {env_id}] Started")
     result_queue.put((env_id, None, obs, False, 0, None))
     action_timeout = 0.01
@@ -105,19 +106,26 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             next_obs, env_reward, done, info = env.step(action)
             step_time = time.time() - step_start
             step_count += 1
-            # Calculate custom reward (using reward_function from lib.phase1)
-            custom_reward, visited_chunks = reward_function(next_obs, done, info, visited_chunks)
+
+            # Call the reward function with current observation, the tracking state, and the timestep.
+            custom_reward, reward_state, timestep = reward_function(
+                current_state=next_obs,
+                prev_state=reward_state,
+                timestep=timestep
+            )
+            # Optionally, if the episode is done, apply any additional penalty.
             if done:
                 custom_reward -= 2000.0
-            episode_step_count += 1
+
             result_queue.put((env_id, action, next_obs, done, custom_reward, info))
             if env_id == 0:
                 env.render()
             if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))
+                result_queue.put((env_id, None, None, True, step_count, None))
                 obs = env.reset()
-                visited_chunks = set()
-                episode_step_count = 0
+                reward_state = None  # Reset reward state at the start of a new episode.
+                step_count = 0
+                timestep = 0  # Reset timestep counter for the new episode.
                 result_queue.put((env_id, None, obs, False, 0, None))
             else:
                 obs = next_obs
