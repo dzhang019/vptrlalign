@@ -119,9 +119,16 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             step_count += 1
             
             # Calculate custom reward
-            custom_reward, visited_chunks = custom_reward_function(
-                next_obs, done, info, visited_chunks
-            )
+            try:
+                custom_reward, reward_state, timestep = reward_function(
+                    current_state=next_obs,
+                    prev_state=reward_state,
+                    timestep=timestep
+                )
+            except KeyError as e:
+                print(f"⚠️ Missing inventory key {e}, resetting reward state")
+                reward_state = None
+                custom_reward = 0
             
             # Apply death penalty if done
             if done:
@@ -162,6 +169,11 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     done_list = [False] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
+    reward_state = {
+        'prev_logs': 0,
+        'has_sword': False,
+        'given_sword_reward': False
+    }
     
     # Wait for initial observations
     for _ in range(num_envs):
