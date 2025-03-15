@@ -679,7 +679,7 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
         env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
         env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
         env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
-        with autocast():
+        with th.amp.autocast(device_type='cuda'):
             policy_loss = -(env_advantages * env_log_probs).mean()
             value_loss = ((env_v_preds - env_returns) ** 2).mean()
             kl_losses = []
