@@ -20,6 +20,7 @@ import numpy as np
 from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from lib.tree_util import tree_map
 from lib.policy_mod import compute_kl_loss
+from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
 # Global flag for clean shutdown
@@ -113,20 +114,7 @@ class PhaseCoordinator:
 # Adding definition for Survival class
 # ----------------- Environment Wrapper -----------------
 # ----------------- Environment Wrapper -----------------
-class HumanSurvival:
-    def __init__(self, **kwargs):
-        # Use standard MineRL environment
-        self.env_id = "MineRLObtainDiamond-v0"  # Regular MineRL environment
-        self.kwargs = {
-            'fovRange': [70, 70],  # Valid parameter for regular MineRL
-            'gammaRange': [2, 2],
-            'texturePack': "default",
-            'renderResolution': 128
-        }
-        self.kwargs.update(kwargs)
-    
-    def make(self):
-        return gym.make(self.env_id, **self.kwargs)
+
         
 def wrap_env(env):
     # Set up observation space modifications
