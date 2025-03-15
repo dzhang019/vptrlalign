@@ -41,43 +41,25 @@ def load_model_parameters(path_to_model_file):
     return policy_kwargs, pi_head_kwargs
 
 class CustomHumanSurvival(HumanSurvival):
-    def __init__(self):
-        # Preserve original environment arguments
-        super().__init__(
-            name="CustomHumanSurvival-v1",
-            resolution=(640, 480),  # Match your POV resolution
-            max_episode_steps=24000,  # 20 minutes at 20fps
-            reward_handler=handlers.RewardForCollectingItems([
-                dict(type="log", amount=1, reward=1.0),
-                dict(type="iron_sword", amount=1, reward=1000.0)
-            ])
-        )
+     def __init__(self):
+        super().__init__(**ENV_KWARGS)
         
-    def create_observables(self):
-        # Properly define observables using MineRL's handler system
-        return super().create_observables() + [
-            handlers.InventoryObservation('log'),
-            handlers.InventoryObservation('iron_sword'),
-            handlers.EquippedItemObservation('mainhand')
-        ]
-
-    def create_rewardables(self):
-        # Explicitly define reward handlers
-        return [
-            handlers.RewardForCollectingItems([
-                dict(type="log", amount=1, reward=1.0)
-            ]),
-            handlers.RewardForCollectingItemsOnce([
-                dict(type="iron_sword", amount=1, reward=1000.0)
-            ])
-        ]
-
-    def create_agent_start(self):
-        return super().create_agent_start()
-
-    def create_agent_handlers(self):
-        return super().create_agent_handlers()
+        # Tree breaking reward (+1 per log collected)
+        self.log_reward = RewardForCollectingItems([
+            dict(type="log", amount=1, reward=1.0)
+        ])
         
+        # Iron sword reward (+1000 once)
+        self.sword_reward = RewardForCollectingItemsOnce([
+            dict(type="iron_sword", amount=1, reward=1000.0)
+        ])
+        
+        # Replace existing reward handlers
+        self.reward_handlers = [
+            self.log_reward,
+            self.sword_reward,
+            # Keep other default handlers if needed
+        ]        
 # Simple thread-safe queue for passing rollouts between threads
 class RolloutQueue:
     def __init__(self, maxsize=10):
