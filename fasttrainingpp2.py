@@ -88,61 +88,68 @@ class PhaseCoordinator:
 
 # Environment worker process (for multiprocessing version)
 def env_worker(env_id, action_queue, result_queue, stop_flag):
-    try:
-        env = HumanSurvival(**ENV_KWARGS).make()
-    except Exception as e:
-        print(f"[Env {env_id}] Error creating environment: {e}")
-        return
-    try:
-        obs = env.reset()
-    except Exception as e:
-        print(f"[Env {env_id}] Error during reset: {e}")
-        env.close()
-        return
+    # Create environment
+    env = HumanSurvival(**ENV_KWARGS).make()
+    
+    # Initialize
     obs = env.reset()
-    # Initialize reward tracking state and timestep counter.
-    reward_state = None  
-    timestep = 0
+    visited_chunks = set()
+    episode_step_count = 0
+    
     print(f"[Env {env_id}] Started")
+    
+    # Send initial observation to main process
     result_queue.put((env_id, None, obs, False, 0, None))
+    
     action_timeout = 0.01
     step_count = 0
     while not stop_flag.value:
         try:
+            # Get action from queue
             action = action_queue.get(timeout=action_timeout)
-            if action is None:
+            
+            if action is None:  # Signal to terminate
                 break
+                
+            # Step environment
             step_start = time.time()
             next_obs, env_reward, done, info = env.step(action)
             step_time = time.time() - step_start
+            #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
-
-            # Call the reward function with current observation, the tracking state, and the timestep.
-            custom_reward, reward_state, timestep = reward_function(
-                current_state=next_obs,
-                prev_state=reward_state,
-                timestep=timestep
+            
+            # Calculate custom reward
+            custom_reward, visited_chunks = custom_reward_function(
+                next_obs, done, info, visited_chunks
             )
-            # Optionally, if the episode is done, apply any additional penalty.
+            
+            # Apply death penalty if done
             if done:
                 custom_reward -= 2000.0
-
+                
+            # Increment step count
+            episode_step_count += 1
+            
+            # Send results back
             result_queue.put((env_id, action, next_obs, done, custom_reward, info))
             if env_id == 0:
                 env.render()
+            # Reset if episode is done
             if done:
-                result_queue.put((env_id, None, None, True, step_count, None))
+                result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
                 obs = env.reset()
-                reward_state = None  # Reset reward state at the start of a new episode.
-                step_count = 0
-                timestep = 0  # Reset timestep counter for the new episode.
-                result_queue.put((env_id, None, obs, False, 0, None))
+                visited_chunks = set()
+                episode_step_count = 0
+                result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
             else:
                 obs = next_obs
+                
         except queue.Empty:
             continue
         except Exception as e:
             print(f"[Env {env_id}] Error: {e}")
+            
+    # Clean up
     print(f"[Env {env_id}] Processed {step_count} steps")
     env.close()
     print(f"[Env {env_id}] Stopped")
