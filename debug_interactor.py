@@ -48,10 +48,11 @@ def request_interactor(instance, ip):
         logger.error(f"Failed to get socket: {e}")
         return False
     
-    # Send hello message
+    # Send hello message - THIS MUST MATCH EXACTLY WHAT'S IN THE CODE
     try:
         logger.debug("Sending hello message...")
-        _MultiAgentEnv._TO_MOVE_hello(sock)
+        # This must match exactly how the hello is defined in _MultiAgentEnv._TO_MOVE_hello
+        comms.send_message(sock, ("<MalmoEnv" + malmo_version + "/>").encode())
         logger.debug("Hello message sent successfully")
     except Exception as e:
         logger.error(f"Error sending hello message: {e}")
