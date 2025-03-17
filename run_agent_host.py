@@ -20,64 +20,31 @@ def get_local_ip():
         s.close()
     return IP
 
-def request_interactor(instance, ip, port):
-    """Request the Minecraft instance to accept an interactor connection."""
-    from minerl.env import comms
-    
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    sock.settimeout(60)
-    sock.connect((instance.host, instance.port))
-    
-    # Send hello message
-    from minerl.env._multiagent import _MultiAgentEnv
-    _MultiAgentEnv._TO_MOVE_hello(sock)
-    
-    # Send interaction request
-    connection_string = f"{ip}:{port}"
-    comms.send_message(sock, f"<Interact>{connection_string}</Interact>".encode())
-    reply = comms.recv_message(sock)
-    ok, = struct.unpack('!I', reply)
-    if not ok:
-        raise RuntimeError(f"Failed to start interactor for {connection_string}")
-    
-    sock.close()
-    return True
-
-def run_interactor_thread(instance, client_port=8888):
-    """Run the interactor in a background thread."""
+def setup_interactor_thread(instance, client_port=8888):
+    """Set up the interactor functionality in a background thread."""
     local_ip = get_local_ip()
     
     def interactor_worker():
-        print(f"\nINTERACTOR: Setting up connection on {local_ip}:{client_port}")
-        try:
-            # Set up connection for localhost
-            success_local = request_interactor(instance, "127.0.0.1", client_port)
-            print(f"INTERACTOR: Local connection setup {'successful' if success_local else 'failed'}")
-            
-            # Set up connection for external access if IP is not localhost
-            if local_ip != "127.0.0.1":
-                success_network = request_interactor(instance, local_ip, client_port)
-                print(f"INTERACTOR: Network connection setup {'successful' if success_network else 'failed'}")
-                
-            print(f"INTERACTOR: Ready to accept Minecraft client connections")
-            print(f"INTERACTOR: Connect your Minecraft client to localhost:{client_port} or {local_ip}:{client_port}")
-        except Exception as e:
-            print(f"INTERACTOR ERROR: {str(e)}")
-    
+        print(f"\nINTERACTOR: Setting up connection on port {client_port}")
+        print(f"INTERACTOR: Run the following command in a separate terminal:")
+        print(f"  python -m interactor {client_port} -i 127.0.0.1   (for local connection)")
+        print(f"  python -m interactor {client_port} -i {local_ip}   (for network connection)")
+        print(f"INTERACTOR: Then connect your Minecraft client to localhost:{client_port} or {local_ip}:{client_port}")
+        
     thread = threading.Thread(target=interactor_worker)
     thread.daemon = True
     thread.start()
     return thread
 
-def main(model, weights, port=8888, debug=False):
+def main(model, weights, port=8888, use_interactor=False, debug=False):
     """
-    Run the MineRL agent and host a server with integrated interactor.
+    Run the MineRL agent with optional interactor setup.
     
     Args:
         model: Path to the model file
         weights: Path to the weights file
-        port: Port for the Minecraft client to connect on
+        port: Port for the interactor to use
+        use_interactor: Whether to attempt integrated interactor setup
         debug: Enable debug logging
     """
     # Setup logging if debug mode is enabled
@@ -103,16 +70,13 @@ def main(model, weights, port=8888, debug=False):
         instance.launch(daemonize=True)
     
     # Allow time for the server to initialize
-    time.sleep(20)
-    
-    # Start the interactor in a background thread
-    interactor_thread = run_interactor_thread(instance, port)
+    time.sleep(5)
     
     local_ip = get_local_ip()
     
     # Print connection information for users
     print("\n" + "="*80)
-    print(f"INTEGRATED MINERL AGENT WITH INTERACTOR")
+    print(f"MINERL AGENT")
     
     # Print Minecraft version again for clarity
     try:
@@ -125,11 +89,14 @@ def main(model, weights, port=8888, debug=False):
     except ImportError:
         print("Could not determine Minecraft version")
     
-    print("\nCONNECTION INFORMATION:")
-    print(f"Local IP address: {local_ip}")
-    print(f"Connection Port: {port}")
-    print(f"To connect from this machine: Open Minecraft and connect to 'localhost:{port}'")
-    print(f"To connect from another machine: Open Minecraft and connect to '{local_ip}:{port}'")
+    # Set up interactor if requested
+    if use_interactor:
+        setup_interactor_thread(instance, port)
+        print("\nINTERACTOR INFO:")
+        print(f"Local IP address: {local_ip}")
+        print(f"Connection Port: {port}")
+        print(f"Follow the instructions above to connect to the agent.")
+    
     print("="*80 + "\n")
     
     # Initialize environment and agent
@@ -149,7 +116,8 @@ def main(model, weights, port=8888, debug=False):
     
     try:
         print("Agent is now running.")
-        print("Open Minecraft and connect to see and control the agent.")
+        if use_interactor:
+            print("Follow the interactor instructions above to connect and control the agent.")
         print("Press Ctrl+C to stop the agent.")
         
         while True:
@@ -167,11 +135,12 @@ def main(model, weights, port=8888, debug=False):
         env.close()
 
 if __name__ == "__main__":
-    parser = ArgumentParser("Run a MineRL agent with integrated interactor")
+    parser = ArgumentParser("Run a MineRL agent with optional interactor setup")
     parser.add_argument("--weights", type=str, required=True, help="Path to the '.weights' file to be loaded.")
     parser.add_argument("--model", type=str, required=True, help="Path to the '.model' file to be loaded.")
-    parser.add_argument("--port", type=int, default=8888, help="Port for Minecraft clients to connect on (default: 8888)")
+    parser.add_argument("--port", type=int, default=8888, help="Port for interactor to use (default: 8888)")
+    parser.add_argument("--interactor", action="store_true", help="Enable interactor setup instructions")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
-    main(args.model, args.weights, args.port, args.debug)
+    main(args.model, args.weights, args.port, args.interactor, args.debug)
