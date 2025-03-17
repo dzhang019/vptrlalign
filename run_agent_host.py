@@ -102,6 +102,7 @@ def main(model, weights, port=8888, use_interactor=False, debug=False):
     # Initialize environment and agent
     print("Starting MineRL environment...")
     env = HumanSurvival(**ENV_KWARGS).make()
+    env.make_interactive(port=6666, realtime=True)
     
     print("Loading agent model...")
     agent_parameters = pickle.load(open(model, "rb"))
