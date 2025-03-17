@@ -103,7 +103,7 @@ def main(model, weights, port=8888, debug=False):
         instance.launch(daemonize=True)
     
     # Allow time for the server to initialize
-    time.sleep(5)
+    time.sleep(20)
     
     # Start the interactor in a background thread
     interactor_thread = run_interactor_thread(instance, port)
