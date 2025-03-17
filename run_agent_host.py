@@ -106,8 +106,29 @@ def main(model, weights, port=8888, use_interactor=False, debug=False):
     # Make the environment interactive if requested
     if use_interactor:
         print("Making environment interactive...")
-        env.make_interactive(port=port, realtime=True)
+        try:
+            # Try the standard method documented
+            env.make_interactive(port=port, realtime=True)
+            print(f"Environment made interactive using standard method on port {port}")
+        except (AttributeError, TypeError) as e:
+            print(f"Standard make_interactive failed: {str(e)}")
+            try:
+                # Try alternative ways that might be in newer versions
+                if hasattr(env, 'env') and hasattr(env.env, 'make_interactive'):
+                    env.env.make_interactive(port=port, realtime=True)
+                    print(f"Environment made interactive using env.env.make_interactive on port {port}")
+                elif hasattr(env, 'unwrapped') and hasattr(env.unwrapped, 'make_interactive'):
+                    env.unwrapped.make_interactive(port=port, realtime=True)
+                    print(f"Environment made interactive using env.unwrapped.make_interactive on port {port}")
+                else:
+                    print("WARNING: Could not find make_interactive method. Interactor might not connect.")
+            except Exception as e2:
+                print(f"Alternative make_interactive methods also failed: {str(e2)}")
+                print("WARNING: Could not make environment interactive. Interactor might not connect.")
+        
         print(f"Environment ready for interactive connections on port {port}")
+        print(f"Now run the interactor in the SAME VIRTUAL ENVIRONMENT:")
+        print(f"  python -m minerl.interactor {port}")
     
     print("Loading agent model...")
     agent_parameters = pickle.load(open(model, "rb"))
