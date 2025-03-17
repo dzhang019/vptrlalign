@@ -102,7 +102,12 @@ def main(model, weights, port=8888, use_interactor=False, debug=False):
     # Initialize environment and agent
     print("Starting MineRL environment...")
     env = HumanSurvival(**ENV_KWARGS).make()
-    env.make_interactive(port=6666, realtime=True)
+    
+    # Make the environment interactive if requested
+    if use_interactor:
+        print("Making environment interactive...")
+        env.make_interactive(port=port, realtime=True)
+        print(f"Environment ready for interactive connections on port {port}")
     
     print("Loading agent model...")
     agent_parameters = pickle.load(open(model, "rb"))
