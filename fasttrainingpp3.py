@@ -147,7 +147,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
 
 # Thread for coordinating environments and collecting rollouts
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
-                       out_episodes, stop_flag, num_envs, phase_coordinator):
+                      out_episodes, stop_flag, num_envs, phase_coordinator):
     obs_list = [None] * num_envs
     done_list = [False] * num_envs
     episode_step_counts = [0] * num_envs
@@ -158,7 +158,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         env_id, _, obs, _, _, _ = result_queue.get()
         obs_list[env_id] = obs
         print(f"[Environment Thread] Got initial observation from env {env_id}")
-    
+
     iteration = 0
     while not stop_flag[0]:
         if phase_coordinator.in_auxiliary_phase():
@@ -166,7 +166,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
             if phase_coordinator.in_auxiliary_phase():
                 continue
-        
+
         iteration += 1
         start_time = time.time()
         rollouts = [
@@ -176,7 +176,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         ]
         env_waiting_for_result = [False] * num_envs
         env_step_counts = [0] * num_envs
-        
+
         # Send actions to all environments
         for env_id in range(num_envs):
             if obs_list[env_id] is not None:
@@ -192,38 +192,45 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                 action_queues[env_id].put(minerl_action)
                 env_waiting_for_result[env_id] = True
-        
+
         total_transitions = 0
         result_timeout = 0.01
-        
+
         while total_transitions < rollout_steps * num_envs:
             if phase_coordinator.in_auxiliary_phase():
                 print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
                 break
             try:
-                env_id, action, next_obs, done, info = result_queue.get(timeout=result_timeout)
+                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
                 if action is None and done and next_obs is None:
-                    #episode_length = reward
+                    # Episode completed notification
+                    episode_length = episode_step_counts[env_id]
                     with open(out_episodes, "a") as f:
                         f.write(f"{episode_length}\n")
+                    episode_step_counts[env_id] = 0
                     continue
                 if action is None and not done:
+                    # Initial observation after reset
                     obs_list[env_id] = next_obs
                     continue
                 if env_waiting_for_result[env_id]:
+                    # Store transition with environment-generated reward
                     rollouts[env_id]["obs"].append(obs_list[env_id])
                     rollouts[env_id]["actions"].append(action)
-                    #rollouts[env_id]["rewards"].append(reward)
+                    rollouts[env_id]["rewards"].append(reward)
                     rollouts[env_id]["dones"].append(done)
                     rollouts[env_id]["hidden_states"].append(tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id]))
                     rollouts[env_id]["next_obs"].append(next_obs)
                     obs_list[env_id] = next_obs
+                    episode_step_counts[env_id] += 1
                     if done:
                         hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
+                        result_queue.put((env_id, None, None, True, episode_step_counts[env_id], None))
+                        episode_step_counts[env_id] = 0
                     env_waiting_for_result[env_id] = False
                     env_step_counts[env_id] += 1
                     total_transitions += 1
-                    if env_step_counts[env_id] < rollout_steps:
+                    if env_step_counts[env_id] < rollout_steps and not done:
                         with th.no_grad():
                             action_info = agent.get_action_and_training_info(
                                 minerl_obs=obs_list[env_id],
@@ -238,7 +245,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                         env_waiting_for_result[env_id] = True
             except queue.Empty:
                 continue
-        
+
         if not phase_coordinator.in_auxiliary_phase():
             end_time = time.time()
             duration = end_time - start_time
