@@ -296,7 +296,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         transition = {
             "obs": rollout["obs"][t],
             "action": rollout["actions"][t],
-            #"reward": rollout["rewards"][t],
+            "reward": rollout["rewards"][t],
             "done": rollout["dones"][t],
             "v_pred": vpred_seq[t],
             "log_prob": log_prob_seq[t],
@@ -324,7 +324,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             bootstrap_value = action_outputs[vpred_index].item()
     gae = 0.0
     for i in reversed(range(T)):
-        #r_i = transitions[i]["reward"]
+        r_i = transitions[i]["reward"]
         v_i = transitions[i]["v_pred"].item()
         done_i = transitions[i]["done"]
         mask = 1.0 - float(done_i)
