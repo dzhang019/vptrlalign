@@ -143,7 +143,9 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                     result_queue.put((env_id, None, obs, False, 0, None))
                 else:
                     obs = next_obs
-
+            except ValueError as e:
+                if "is closed" in str(e):
+                    break
             except queue.Empty:
                 if stop_flag.value:
                     break
@@ -172,6 +174,15 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
 
     iteration = 0
     while not stop_flag[0] and not all(done_list):
+        if action_queues[env_id]._closed:  # Check if queue is closed
+            break
+         try:
+            action_queues[env_id].put(minerl_action)
+        except ValueError as e:
+            if "is closed" in str(e) and stop_flag[0]:
+                break  # Graceful exit when queue closed intentionally
+            else:
+                raise
         if phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
             phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
@@ -881,6 +892,35 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
         print("Setting stop flag...")
         thread_stop[0] = True
         stop_flag.value = True
+    
+        # Drain queues in order
+        print("Draining queues...")
+        while not result_queue.empty():
+            result_queue.get()
+            
+        # Send termination signals
+        print("Stopping workers...")
+        for q in action_queues:
+            try:
+                while not q.empty():
+                    q.get_nowait()
+                q.put(None)  # Final termination signal
+            except:
+                pass
+
+        print("Waiting for threads...")
+        env_thread.join(timeout=10)
+        train_thread.join(timeout=10)
+    
+        # Explicit queue closing
+        print("Closing queues...")
+        for q in action_queues:
+            q.close()
+            q.join_thread()
+        result_queue.close()
+        
+        # Then proceed with process termination
+        print("Cleaning processes...")
     
     # Drain all queues
     rollout_queue.stop()
