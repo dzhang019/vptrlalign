@@ -470,6 +470,8 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     
     phase_coordinator = PhaseCoordinator()
     stop_flag = mp.Value('b', False)
+    # Create a thread-safe stop flag for the threads
+    thread_stop = [False]  # Using a list as a mutable container
     action_queues = [Queue() for _ in range(num_envs)]
     result_queue = Queue()
     rollout_queue = RolloutQueue(maxsize=queue_size)
@@ -501,6 +503,7 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     print("Starting threads...")
     env_thread.start()
     train_thread.start()
+                    
     try:
         train_thread.join()
     except KeyboardInterrupt:
