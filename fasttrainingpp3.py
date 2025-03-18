@@ -143,9 +143,8 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                     result_queue.put((env_id, None, obs, False, 0, None))
                 else:
                     obs = next_obs
-            except ValueError as e:
-                if "is closed" in str(e):
-                    break
+            except ValueError:
+                break
             except queue.Empty:
                 if stop_flag.value:
                     break
@@ -179,11 +178,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             
         try:
             action_queues[env_id].put(minerl_action)
+
+        except queue.Empty:
+            if stop_flag[0]:
+                break
         except ValueError as e:
             if "is closed" in str(e) and stop_flag[0]:
-                break  # Graceful exit when queue closed intentionally
-            else:
-                raise
+                break
         if phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
             phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
@@ -202,6 +203,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
 
         # Send actions to all environments
         for env_id in range(num_envs):
+            if stop_flag[0]:
+                break
+            try:
+                if not action_queues[env_id]._closed:
+                    action_queues[env_id].put(minerl_action)
+            except ValueError:
+                break
             if obs_list[env_id] is not None:
                 with th.no_grad():
                     action_info = agent.get_action_and_training_info(
@@ -278,7 +286,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         else:
             phase_coordinator.buffer_rollout(rollouts)
             print(f"[Environment Thread] Iteration {iteration} - buffering {sum(len(r['obs']) for r in rollouts)} transitions")
-
+                
 
 # Process rollouts into transitions and record old outputs via pretrained_policy
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
@@ -824,7 +832,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             LAMBDA_KL *= KL_DECAY
     while iteration < num_iterations and not stop_flag[0]:
         try:
-            rollouts = rollout_queue.get(timeout=5.0)
+            rollouts = rollout_queue.get(timeout=1.0)
         except queue.Empty:
             if stop_flag[0]:
                 break
@@ -890,68 +898,40 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     except KeyboardInterrupt:
         print("Interrupted by user, stopping threads and processes...")
     finally:
-        print("Setting stop flag...")
+        print("Starting cleanup...")
         thread_stop[0] = True
         stop_flag.value = True
     
-        # Drain queues in order
-        print("Draining queues...")
-        while not result_queue.empty():
-            result_queue.get()
-            
-        # Send termination signals
-        print("Stopping workers...")
+        # 1. Stop environment thread first
+        print("Stopping environment thread...")
+        env_thread.join(timeout=5.0)
+        
+        # 2. Stop training thread
+        print("Stopping training thread...")
+        train_thread.join(timeout=5.0)
+        
+        # 3. Send termination signals to env workers
+        print("Terminating workers...")
         for q in action_queues:
             try:
-                while not q.empty():
-                    q.get_nowait()
-                q.put(None)  # Final termination signal
+                q.put(None, timeout=1.0)
             except:
                 pass
-
-        print("Waiting for threads...")
-        env_thread.join(timeout=10)
-        train_thread.join(timeout=10)
-    
-        # Explicit queue closing
+        
+        # 4. Close queues after threads stop
         print("Closing queues...")
         for q in action_queues:
             q.close()
-            q.join_thread()
         result_queue.close()
         
-        # Then proceed with process termination
-        print("Cleaning processes...")
-    
-    # Drain all queues
-    rollout_queue.stop()
-    for q in action_queues:
-        while not q.empty():
-            q.get()
-        q.put(None)  # Ensure env workers exit
-    
-    # Add explicit queue closing
-    result_queue.close()
-    for q in action_queues:
-        q.close()
-    
-    print("Waiting for threads...")
-    env_thread.join(timeout=15)
-    train_thread.join(timeout=15)
-    
-    # Force terminate if still alive
-    if env_thread.is_alive() or train_thread.is_alive():
-        print("Threads hanging - force terminating")
-    
-    print("Cleaning processes...")
-    for i, p in enumerate(workers):
-        if p.is_alive():
+        # 5. Terminate stubborn processes
+        print("Terminating processes...")
+        for p in workers:
             p.terminate()
-        p.join()
-    
-    dummy_env.close()
-    print(f"Saving weights to {out_weights}")
-    th.save(agent.policy.state_dict(), out_weights)
+            p.join()
+        
+        print(f"Saving weights to {out_weights}")
+        th.save(agent.policy.state_dict(), out_weights)
 
 
 if __name__ == "__main__":
