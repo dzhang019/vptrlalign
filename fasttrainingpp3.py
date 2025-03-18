@@ -115,48 +115,6 @@ class PhaseCoordinator:
 
 
 # Environment worker process (for multiprocessing version)
-# Simplify env_worker by removing custom reward calculation
-def env_worker(env_id, action_queue, result_queue, stop_flag):
-    try:
-        env = CustomHumanSurvival().make()
-        obs = env.reset()
-    except Exception as e:
-        print(f"[Env {env_id}] Error during setup: {e}")
-        return
-
-    print(f"[Env {env_id}] Started")
-    try:
-        # Send initial observation
-        result_queue.put((env_id, None, obs, False, 0, None))
-        
-        while not stop_flag.value:
-            try:
-                action = action_queue.get(timeout=0.01)
-                if action is None or stop_flag.value:
-                    break
-
-                next_obs, env_reward, done, info = env.step(action)
-                result_queue.put((env_id, action, next_obs, done, env_reward, info))
-                
-                if done:
-                    obs = env.reset()
-                    result_queue.put((env_id, None, obs, False, 0, None))
-                else:
-                    obs = next_obs
-            except ValueError:
-                break
-            except queue.Empty:
-                if stop_flag.value:
-                    break
-                continue
-            except Exception as e:
-                print(f"[Env {env_id}] Error in step: {e}")
-                obs = env.reset()
-                result_queue.put((env_id, None, obs, False, 0, None))
-    finally:
-        env.close()
-
-
 # Thread for coordinating environments and collecting rollouts
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     try:
@@ -165,7 +123,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
     except Exception as e:
         print(f"[Env {env_id}] Error during setup: {e}")
         return
-
+    
     print(f"[Env {env_id}] Started")
     try:
         result_queue.put((env_id, None, obs, False, 0, None))
@@ -179,7 +137,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                     if stop_flag.value:
                         break
                     continue
-                
+                    
                 # Add timeout to environment step
                 next_obs, env_reward, done, info = env.step(action)
                 result_queue.put((env_id, action, next_obs, done, env_reward, info))
@@ -187,14 +145,14 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                 if done:
                     obs = env.reset()
                     result_queue.put((env_id, None, obs, False, 0, None))
-
+    
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 print(f"[Env {env_id}] Error in step: {e}")
                 if stop_flag.value:
                     break
-
+    
     except KeyboardInterrupt:
         pass
     finally:
@@ -204,6 +162,175 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             pass
         print(f"[Env {env_id}] Stopped")
 
+def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
+                      out_episodes, stop_flag, num_envs, phase_coordinator):
+    obs_list = [None] * num_envs
+    episode_step_counts = [0] * num_envs
+    hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
+    
+    # Wait for initial observations
+    for _ in range(num_envs):
+        try:
+            env_id, _, obs, _, _, _ = result_queue.get()
+            obs_list[env_id] = obs
+            print(f"[Environment Thread] Got initial observation from env {env_id}")
+        except:
+            if stop_flag[0]:
+                return
+
+    iteration = 0
+    while not stop_flag[0]:
+        if phase_coordinator.in_auxiliary_phase():
+            print("[Environment Thread] Pausing collection during auxiliary phase")
+            phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
+            if stop_flag[0] or not phase_coordinator.in_auxiliary_phase():
+                continue
+            else:
+                break
+
+        iteration += 1
+        start_time = time.time()
+        rollouts = [
+            {"obs": [], "actions": [], "rewards": [], "dones": [],
+             "hidden_states": [], "next_obs": []}
+            for _ in range(num_envs)
+        ]
+        env_waiting_for_result = [False] * num_envs
+        env_step_counts = [0] * num_envs
+
+        # Send actions to all environments
+        for env_id in range(num_envs):
+            if stop_flag[0]:
+                break
+            if obs_list[env_id] is None:
+                continue
+                
+            try:
+                with th.no_grad():
+                    action_info = agent.get_action_and_training_info(
+                        minerl_obs=obs_list[env_id],
+                        hidden_state=hidden_states[env_id],
+                        stochastic=True,
+                        taken_action=None
+                    )
+                    minerl_action = action_info[0]
+                    new_hid = action_info[-1]
+                
+                hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                if not action_queues[env_id]._closed:
+                    action_queues[env_id].put(minerl_action)
+                    env_waiting_for_result[env_id] = True
+            except ValueError as e:
+                if "is closed" in str(e) and stop_flag[0]:
+                    break
+            except Exception as e:
+                print(f"[Env {env_id}] Error generating action: {e}")
+                if stop_flag[0]:
+                    break
+
+        total_transitions = 0
+        result_timeout = 0.1  # Increased timeout for better responsiveness
+
+        while total_transitions < rollout_steps * num_envs and not stop_flag[0]:
+            if phase_coordinator.in_auxiliary_phase():
+                print(f"[Environment Thread] Auxiliary phase started during collection")
+                break
+
+            try:
+                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
+                
+                if action is None:
+                    if done:  # Episode completed
+                        with open(out_episodes, "a") as f:
+                            f.write(f"{episode_step_counts[env_id]}\n")
+                        episode_step_counts[env_id] = 0
+                    continue  # Skip initial/reset observations
+
+                if env_waiting_for_result[env_id]:
+                    # Store transition
+                    rollouts[env_id]["obs"].append(obs_list[env_id])
+                    rollouts[env_id]["actions"].append(action)
+                    rollouts[env_id]["rewards"].append(reward)
+                    rollouts[env_id]["dones"].append(done)
+                    rollouts[env_id]["hidden_states"].append(
+                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id])
+                    )
+                    rollouts[env_id]["next_obs"].append(next_obs)
+                    
+                    obs_list[env_id] = next_obs
+                    episode_step_counts[env_id] += 1
+                    env_waiting_for_result[env_id] = False
+                    env_step_counts[env_id] += 1
+                    total_transitions += 1
+
+                    if done:
+                        hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
+                        result_queue.put((env_id, None, None, True, episode_step_counts[env_id], None))
+                        episode_step_counts[env_id] = 0
+
+                    # Send next action if needed
+                    if env_step_counts[env_id] < rollout_steps and not done and not stop_flag[0]:
+                        try:
+                            with th.no_grad():
+                                action_info = agent.get_action_and_training_info(
+                                    minerl_obs=obs_list[env_id],
+                                    hidden_state=hidden_states[env_id],
+                                    stochastic=True,
+                                    taken_action=None
+                                )
+                                minerl_action = action_info[0]
+                                new_hid = action_info[-1]
+                            
+                            hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                            if not action_queues[env_id]._closed:
+                                action_queues[env_id].put(minerl_action)
+                                env_waiting_for_result[env_id] = True
+                        except ValueError as e:
+                            if "is closed" in str(e) and stop_flag[0]:
+                                break
+
+            except queue.Empty:
+                if stop_flag[0]:
+                    break
+                continue
+            except ValueError as e:
+                if "is closed" in str(e) and stop_flag[0]:
+                    break
+            except Exception as e:
+                print(f"[Environment Thread] Error processing result: {e}")
+                if stop_flag[0]:
+                    break
+
+        if not phase_coordinator.in_auxiliary_phase() and not stop_flag[0]:
+            end_time = time.time()
+            duration = end_time - start_time
+            actual_transitions = sum(len(r["obs"]) for r in rollouts)
+            try:
+                rollout_queue.put(rollouts, timeout=1.0)
+                print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions in {duration:.2f}s")
+            except queue.Full:
+                print(f"[Environment Thread] Dropped rollouts due to full queue")
+            except:
+                if stop_flag[0]:
+                    return
+        elif not stop_flag[0]:
+            phase_coordinator.buffer_rollout(rollouts)
+
+    # Cleanup after stop_flag is set
+    print("[Environment Thread] Shutting down...")
+    # Flush remaining results
+    while not result_queue.empty():
+        try:
+            result_queue.get_nowait()
+        except:
+            break
+    # Send termination signals to environments
+    for env_id in range(num_envs):
+        try:
+            if not action_queues[env_id]._closed:
+                action_queues[env_id].put(None)
+        except:
+            pass
 # Process rollouts into transitions and record old outputs via pretrained_policy
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     transitions = []
