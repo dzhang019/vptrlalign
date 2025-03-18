@@ -163,7 +163,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
 
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue,
                        out_episodes, stop_flag, num_envs, phase_coordinator):
-    # Create lists of length num_envs
+    # Create lists for all environments
     obs_list = [None] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
@@ -174,10 +174,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     start_time = time.time()
     timeout = 60
 
-    # Initialize environments with timeout
+    # Wait for initialization messages for up to 'timeout' seconds
     while time.time() - start_time < timeout and sum(initialized) < num_envs and not stop_flag[0]:
         try:
-            msg_type, env_id, obs, done, reward, info = result_queue.get(timeout=1.0)
+            msg = result_queue.get(timeout=1.0)
+            # Debug print: show received messages
+            print("Received INIT message:", msg)
+            msg_type, env_id, obs, done, reward, info = msg
             if msg_type == "INIT" and obs is not None:
                 obs_list[env_id] = obs
                 initialized[env_id] = True
@@ -185,13 +188,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             elif msg_type == "ERROR":
                 print(f"Failed to initialize env {env_id}: {info}")
         except queue.Empty:
-            if stop_flag[0]:
-                return
+            continue
 
-    # If not all environments initialized, adjust to use only the successful ones.
-    if sum(initialized) < num_envs:
+    # Instead of immediately stopping, proceed with only the successful ones
+    num_success = sum(initialized)
+    if num_success < num_envs:
+        print(f"Warning: Only {num_success} out of {num_envs} environments initialized successfully")
         successful_envs = [i for i, init in enumerate(initialized) if init]
-        print(f"Only {len(successful_envs)} out of {num_envs} environments initialized successfully: {successful_envs}")
         if len(successful_envs) == 0:
             stop_flag[0] = True
             return
@@ -200,9 +203,11 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         episode_step_counts = [episode_step_counts[i] for i in successful_envs]
         hidden_states = [hidden_states[i] for i in successful_envs]
         last_actions = [last_actions[i] for i in successful_envs]
+        # Also filter the action queues if desired (or simply use the ones corresponding to successful envs)
+        # For simplicity we adjust num_envs here:
         num_envs = len(successful_envs)
 
-    # Optionally, get additional INIT/RESET messages if needed.
+    # (Optionally, wait for additional INIT/RESET messages if needed)
     for _ in range(num_envs):
         try:
             msg_type, env_id, obs, done, reward, info = result_queue.get(timeout=1.0)
@@ -213,6 +218,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             if stop_flag[0]:
                 return
 
+    # Then continue with rollout collection as before...
     iteration = 0
     while not stop_flag[0]:
         if phase_coordinator.in_auxiliary_phase():
@@ -230,7 +236,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         env_waiting_for_result = [False] * num_envs
         env_step_counts = [0] * num_envs
 
-        # Send actions to each environment
+        # Send an action to each environment
         for env_id in range(num_envs):
             if stop_flag[0]:
                 break
@@ -327,7 +333,6 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 print("[Environment Thread] Dropped rollouts due to full queue")
         elif not stop_flag[0]:
             phase_coordinator.buffer_rollout(rollouts)
-
     print("[Environment Thread] Shutting down...")
     while not result_queue.empty():
         try:
@@ -340,6 +345,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 action_queues[env_id].put(None)
         except:
             pass
+
 
 
 # (The rest of the functions train_unroll, run_sleep_phase, run_policy_update,
