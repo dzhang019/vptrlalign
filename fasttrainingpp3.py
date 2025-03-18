@@ -178,6 +178,19 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             
         try:
             action_queues[env_id].put(minerl_action)
+            for env_id in range(num_envs):
+                if stop_flag[0]:
+                    break
+                try:
+                    if not action_queues[env_id]._closed:
+                        action_queues[env_id].put(minerl_action)
+                except ValueError:
+                     if stop_flag[0]:
+                            break
+                        raise
+        except queue.Empty:
+                if stop_flag[0]:
+                    break
 
         except queue.Empty:
             if stop_flag[0]:
@@ -202,14 +215,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         env_step_counts = [0] * num_envs
 
         # Send actions to all environments
-        for env_id in range(num_envs):
-            if stop_flag[0]:
-                break
-            try:
-                if not action_queues[env_id]._closed:
-                    action_queues[env_id].put(minerl_action)
-            except ValueError:
-                break
+        
             if obs_list[env_id] is not None:
                 with th.no_grad():
                     action_info = agent.get_action_and_training_info(
@@ -902,32 +908,42 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
         thread_stop[0] = True
         stop_flag.value = True
     
-        # 1. Stop environment thread first
-        print("Stopping environment thread...")
-        env_thread.join(timeout=5.0)
-        
-        # 2. Stop training thread
+        # 1. Stop training thread first
         print("Stopping training thread...")
         train_thread.join(timeout=5.0)
         
-        # 3. Send termination signals to env workers
-        print("Terminating workers...")
+        # 2. Stop environment thread
+        print("Stopping environment thread...")
+        env_thread.join(timeout=5.0)
+        
+        # 3. Drain queues
+        print("Draining queues...")
+        for q in action_queues:
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except:
+                    pass
+        
+        # 4. Send termination signals
+        print("Sending poison pills...")
         for q in action_queues:
             try:
                 q.put(None, timeout=1.0)
             except:
                 pass
         
-        # 4. Close queues after threads stop
+        # 5. Close queues
         print("Closing queues...")
         for q in action_queues:
             q.close()
         result_queue.close()
         
-        # 5. Terminate stubborn processes
-        print("Terminating processes...")
+        # 6. Terminate processes
+        print("Terminating workers...")
         for p in workers:
-            p.terminate()
+            if p.is_alive():
+                p.terminate()
             p.join()
         
         print(f"Saving weights to {out_weights}")
