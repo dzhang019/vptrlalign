@@ -475,7 +475,7 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     action_queues = [Queue() for _ in range(num_envs)]
     result_queue = Queue()
     rollout_queue = RolloutQueue(maxsize=queue_size)
-    
+
     workers = []
     for env_id in range(num_envs):
         p = Process(
@@ -487,8 +487,9 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
         time.sleep(0.4)
     
     # Add a delay to ensure worker processes have time to send INIT messages.
+    print(f"Starting {num_envs} environment processes with rollout steps={rollout_steps}")
     print("Waiting for worker processes to initialize...")
-    time.sleep(2)
+    time.sleep(5)
     
     # Then start the threads.
     env_thread = threading.Thread(
@@ -502,6 +503,7 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     )
     print("Starting threads...")
     env_thread.start()
+    time.sleep(1)
     train_thread.start()
                     
     try:
