@@ -20,7 +20,7 @@ from lib.tree_util import tree_map
 
 # Instead of a fixed import for the reward function, you can later dynamically import one if desired.
 # For now we use:
-#from lib.phase1 import reward_function
+#from lib.phase1 import 
 
 # Import our modified compute_kl_loss (which now accepts a temperature T)
 from lib.policy_mod import compute_kl_loss
@@ -144,6 +144,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                     }
                 
                 # Calculate custom reward
+                '''
                 custom_reward, new_reward_state, new_timestep = reward_function(
                     current_state=next_obs,
                     prev_state=reward_state,
@@ -151,7 +152,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                 )
                 reward_state = new_reward_state
                 timestep = new_timestep
-
+                '''
                 result_queue.put((env_id, action, next_obs, done, custom_reward, info))
                 
                 if done:
