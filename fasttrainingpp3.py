@@ -73,12 +73,12 @@ class RolloutQueue:
 
     def stop(self):
     """Signal queue to stop all operations"""
-    while not self.queue.empty():
-        try:
-            self.queue.get_nowait()
-        except queue.Empty:
-            break
-    self.queue.put(None)  # Add poison pill
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
+        self.queue.put(None)  # Add poison pill
 
 
 # Phase coordinator for synchronizing policy and auxiliary phases
