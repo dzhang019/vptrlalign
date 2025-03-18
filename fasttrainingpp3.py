@@ -185,9 +185,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     if not action_queues[env_id]._closed:
                         action_queues[env_id].put(minerl_action)
                 except ValueError:
-                     if stop_flag[0]:
-                            break
-                        raise
+                    if stop_flag[0]:
+                        break
+                    raise
         except queue.Empty:
                 if stop_flag[0]:
                     break
