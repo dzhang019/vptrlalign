@@ -177,7 +177,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             break
             
         try:
-            action_queues[env_id].put(minerl_action)
+            #action_queues[env_id].put(minerl_action)
             for env_id in range(num_envs):
                 if stop_flag[0]:
                     break
