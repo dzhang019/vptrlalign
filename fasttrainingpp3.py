@@ -118,13 +118,16 @@ class PhaseCoordinator:
 # Environment worker process (for multiprocessing version)
 # Thread for coordinating environments and collecting rollouts
 def env_worker(env_id, action_queue, result_queue, stop_flag):
+    env = None
     try:
         env = CustomHumanSurvival().make()
         obs = env.reset()
-        # Immediately send initial observation with confirmation
-        result_queue.put(("INIT", env_id, obs, False, 0, None), block=True, timeout=5.0)
+        result_queue.put(("INIT", env_id, obs, False, 0, None))
+        print(f"[Env {env_id}] Initialized successfully")
     except Exception as e:
-        print(f"[Env {env_id}] Failed to initialize: {e}")
+        print(f"[Env {env_id}] INIT ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         result_queue.put(("ERROR", env_id, None, True, 0, str(e)))
         return
 
@@ -173,9 +176,10 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     obs_list = [None] * num_envs
     initialized = [False] * num_envs
     start_time = time.time()
+    timeout=60
     
     # Initialize environments with timeout
-    while time.time() - start_time < 30 and sum(initialized) < num_envs and not stop_flag[0]:
+    while time.time() - start_time < timeout and sum(initialized) < num_envs and not stop_flag[0]:
         try:
             msg_type, env_id, obs, done, reward, info = result_queue.get(timeout=1.0)
             if msg_type == "INIT" and obs is not None:
