@@ -161,48 +161,28 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
                       out_episodes, stop_flag, num_envs, phase_coordinator):
     obs_list = [None] * num_envs
-    done_list = [False] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
     # Wait for initial observations
     for _ in range(num_envs):
-        env_id, _, obs, _, _, _ = result_queue.get()
-        obs_list[env_id] = obs
-        print(f"[Environment Thread] Got initial observation from env {env_id}")
+        try:
+            env_id, _, obs, _, _, _ = result_queue.get()
+            obs_list[env_id] = obs
+            print(f"[Environment Thread] Got initial observation from env {env_id}")
+        except:
+            if stop_flag[0]:
+                return
 
     iteration = 0
-    while not stop_flag[0] and not all(done_list):
-        if action_queues[env_id]._closed:  # Check if queue is closed
-            break
-            
-        try:
-            #action_queues[env_id].put(minerl_action)
-            for env_id in range(num_envs):
-                if stop_flag[0]:
-                    break
-                try:
-                    if not action_queues[env_id]._closed:
-                        action_queues[env_id].put(minerl_action)
-                except ValueError:
-                    if stop_flag[0]:
-                        break
-                    raise
-        except queue.Empty:
-                if stop_flag[0]:
-                    break
-
-        except queue.Empty:
-            if stop_flag[0]:
-                break
-        except ValueError as e:
-            if "is closed" in str(e) and stop_flag[0]:
-                break
+    while not stop_flag[0]:
         if phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
             phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
-            if phase_coordinator.in_auxiliary_phase():
+            if stop_flag[0] or not phase_coordinator.in_auxiliary_phase():
                 continue
+            else:
+                break
 
         iteration += 1
         start_time = time.time()
@@ -215,83 +195,138 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         env_step_counts = [0] * num_envs
 
         # Send actions to all environments
-        
-        if obs_list[env_id] is not None:
-            with th.no_grad():
-                action_info = agent.get_action_and_training_info(
-                minerl_obs=obs_list[env_id],
-                    hidden_state=hidden_states[env_id],
-                    stochastic=True,
-                    taken_action=None
-                )
-                minerl_action = action_info[0]
-                new_hid = action_info[-1]
-            hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-            action_queues[env_id].put(minerl_action)
-            env_waiting_for_result[env_id] = True
+        for env_id in range(num_envs):
+            if stop_flag[0]:
+                break
+            if obs_list[env_id] is None:
+                continue
+                
+            try:
+                with th.no_grad():
+                    action_info = agent.get_action_and_training_info(
+                        minerl_obs=obs_list[env_id],
+                        hidden_state=hidden_states[env_id],
+                        stochastic=True,
+                        taken_action=None
+                    )
+                    minerl_action = action_info[0]
+                    new_hid = action_info[-1]
+                
+                hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                if not action_queues[env_id]._closed:
+                    action_queues[env_id].put(minerl_action)
+                    env_waiting_for_result[env_id] = True
+            except ValueError as e:
+                if "is closed" in str(e) and stop_flag[0]:
+                    break
+            except Exception as e:
+                print(f"[Env {env_id}] Error generating action: {e}")
+                if stop_flag[0]:
+                    break
 
         total_transitions = 0
-        result_timeout = 0.01
-    
-        while total_transitions < rollout_steps * num_envs:
+        result_timeout = 0.1  # Increased timeout for better responsiveness
+
+        while total_transitions < rollout_steps * num_envs and not stop_flag[0]:
             if phase_coordinator.in_auxiliary_phase():
-                print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
+                print(f"[Environment Thread] Auxiliary phase started during collection")
                 break
+
             try:
                 env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
-                if action is None and done and next_obs is None:
-                    # Episode completed notification
-                    episode_length = episode_step_counts[env_id]
-                    with open(out_episodes, "a") as f:
-                        f.write(f"{episode_length}\n")
-                    episode_step_counts[env_id] = 0
-                    continue
-                if action is None and not done:
-                    # Initial observation after reset
-                    obs_list[env_id] = next_obs
-                    continue
+                
+                if action is None:
+                    if done:  # Episode completed
+                        with open(out_episodes, "a") as f:
+                            f.write(f"{episode_step_counts[env_id]}\n")
+                        episode_step_counts[env_id] = 0
+                    continue  # Skip initial/reset observations
+
                 if env_waiting_for_result[env_id]:
-                    # Store transition with environment-generated reward
+                    # Store transition
                     rollouts[env_id]["obs"].append(obs_list[env_id])
                     rollouts[env_id]["actions"].append(action)
                     rollouts[env_id]["rewards"].append(reward)
                     rollouts[env_id]["dones"].append(done)
-                    rollouts[env_id]["hidden_states"].append(tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id]))
+                    rollouts[env_id]["hidden_states"].append(
+                        tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id])
+                    )
                     rollouts[env_id]["next_obs"].append(next_obs)
+                    
                     obs_list[env_id] = next_obs
                     episode_step_counts[env_id] += 1
+                    env_waiting_for_result[env_id] = False
+                    env_step_counts[env_id] += 1
+                    total_transitions += 1
+
                     if done:
                         hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
                         result_queue.put((env_id, None, None, True, episode_step_counts[env_id], None))
                         episode_step_counts[env_id] = 0
-                    env_waiting_for_result[env_id] = False
-                    env_step_counts[env_id] += 1
-                    total_transitions += 1
-                    if env_step_counts[env_id] < rollout_steps and not done:
-                        with th.no_grad():
-                            action_info = agent.get_action_and_training_info(
-                                minerl_obs=obs_list[env_id],
-                                hidden_state=hidden_states[env_id],
-                                stochastic=True,
-                                taken_action=None
-                            )
-                            minerl_action = action_info[0]
-                            new_hid = action_info[-1]
-                        hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-                        action_queues[env_id].put(minerl_action)
-                        env_waiting_for_result[env_id] = True
-            except queue.Empty:
-                continue
 
-        if not phase_coordinator.in_auxiliary_phase():
+                    # Send next action if needed
+                    if env_step_counts[env_id] < rollout_steps and not done and not stop_flag[0]:
+                        try:
+                            with th.no_grad():
+                                action_info = agent.get_action_and_training_info(
+                                    minerl_obs=obs_list[env_id],
+                                    hidden_state=hidden_states[env_id],
+                                    stochastic=True,
+                                    taken_action=None
+                                )
+                                minerl_action = action_info[0]
+                                new_hid = action_info[-1]
+                            
+                            hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+                            if not action_queues[env_id]._closed:
+                                action_queues[env_id].put(minerl_action)
+                                env_waiting_for_result[env_id] = True
+                        except ValueError as e:
+                            if "is closed" in str(e) and stop_flag[0]:
+                                break
+
+            except queue.Empty:
+                if stop_flag[0]:
+                    break
+                continue
+            except ValueError as e:
+                if "is closed" in str(e) and stop_flag[0]:
+                    break
+            except Exception as e:
+                print(f"[Environment Thread] Error processing result: {e}")
+                if stop_flag[0]:
+                    break
+
+        if not phase_coordinator.in_auxiliary_phase() and not stop_flag[0]:
             end_time = time.time()
             duration = end_time - start_time
             actual_transitions = sum(len(r["obs"]) for r in rollouts)
-            rollout_queue.put(rollouts)
-            print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions across {num_envs} envs in {duration:.3f}s")
-        else:
+            try:
+                rollout_queue.put(rollouts, timeout=1.0)
+                print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions in {duration:.2f}s")
+            except queue.Full:
+                print(f"[Environment Thread] Dropped rollouts due to full queue")
+            except:
+                if stop_flag[0]:
+                    return
+        elif not stop_flag[0]:
             phase_coordinator.buffer_rollout(rollouts)
-            print(f"[Environment Thread] Iteration {iteration} - buffering {sum(len(r['obs']) for r in rollouts)} transitions")
+
+    # Cleanup after stop_flag is set
+    print("[Environment Thread] Shutting down...")
+    # Flush remaining results
+    while not result_queue.empty():
+        try:
+            result_queue.get_nowait()
+        except:
+            break
+    # Send termination signals to environments
+    for env_id in range(num_envs):
+        try:
+            if not action_queues[env_id]._closed:
+                action_queues[env_id].put(None)
+        except:
+            pass
                 
 
 # Process rollouts into transitions and record old outputs via pretrained_policy
