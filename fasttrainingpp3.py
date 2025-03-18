@@ -72,7 +72,7 @@ class RolloutQueue:
         return self.queue.qsize()
 
     def stop(self):
-    """Signal queue to stop all operations"""
+        #Signal queue to stop all operations
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
