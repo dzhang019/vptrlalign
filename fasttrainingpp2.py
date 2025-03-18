@@ -352,6 +352,100 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
 # training_thread, and train_rl_mp remain essentially as in the previous corrected version.)
 # For brevity, please refer to the previous complete implementation for these parts.
 # They have not been modified regarding the initialization hang.
+def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator, args):
+    LEARNING_RATE = 5e-6
+    MAX_GRAD_NORM = 1.0
+    LAMBDA_KL = args.lambda_kl  # from command line
+    GAMMA = 0.9999
+    LAM = 0.95
+    VALUE_LOSS_COEF = 0.5
+    KL_DECAY = 0.9995
+    PPG_ENABLED = True
+    PPG_N_PI_UPDATES = 8
+    PPG_BETA_CLONE = 1.0
+
+    optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
+    running_loss = 0.0
+    total_steps = 0
+    iteration = 0
+    scaler = GradScaler()
+    
+    pi_update_counter = 0
+    stored_rollouts = []
+    has_aux_head = hasattr(agent.policy, 'aux_value_head')
+    if has_aux_head:
+        print("[Training Thread] Detected auxiliary value head, enabling PPG")
+    else:
+        print("[Training Thread] No auxiliary value head detected, PPG will be disabled")
+        PPG_ENABLED = False
+
+    while iteration < num_iterations and not stop_flag[0]:
+        iteration += 1
+        do_aux_phase = (PPG_ENABLED and has_aux_head and 
+                        pi_update_counter >= PPG_N_PI_UPDATES and 
+                        len(stored_rollouts) > 0)
+        if do_aux_phase:
+            phase_coordinator.start_auxiliary_phase()
+            print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
+            recent_rollouts = get_recent_rollouts(stored_rollouts, max_rollouts=5)
+            run_sleep_phase(
+                agent=agent,
+                recent_rollouts=recent_rollouts,
+                optimizer=optimizer,
+                scaler=scaler,
+                max_grad_norm=MAX_GRAD_NORM,
+                beta_clone=PPG_BETA_CLONE
+            )
+            phase_coordinator.end_auxiliary_phase()
+            print("[Training Thread] Auxiliary phase complete")
+            buffered_rollouts = phase_coordinator.get_buffered_rollouts()
+            if buffered_rollouts:
+                print(f"[Training Thread] Processing {len(buffered_rollouts)} buffered rollouts")
+                for rollout in buffered_rollouts:
+                    rollout_queue.put(rollout)
+            pi_update_counter = 0
+            stored_rollouts = []
+            th.cuda.empty_cache()
+        else:
+            pi_update_counter += 1
+            print(f"[Training Thread] Policy phase {pi_update_counter}/{PPG_N_PI_UPDATES} - Waiting for rollouts...")
+            wait_start = time.time()
+            rollouts = rollout_queue.get()
+            wait_duration = time.time() - wait_start
+            print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+            if PPG_ENABLED and has_aux_head:
+                stored_rollouts.append(rollouts)
+                if len(stored_rollouts) > 2:
+                    stored_rollouts = stored_rollouts[-2:]
+            train_start = time.time()
+            print(f"[Training Thread] Processing rollouts for iteration {iteration}")
+            avg_policy_loss, avg_value_loss, avg_kl_loss, num_transitions = run_policy_update(
+                agent=agent,
+                pretrained_policy=pretrained_policy,
+                rollouts=rollouts,
+                optimizer=optimizer,
+                scaler=scaler,
+                value_loss_coef=VALUE_LOSS_COEF,
+                lambda_kl=LAMBDA_KL,
+                max_grad_norm=MAX_GRAD_NORM,
+                temp=args.temp  # Pass temperature argument
+            )
+            train_duration = time.time() - train_start
+            print(f"[Training Thread] Policy Phase {pi_update_counter}/{PPG_N_PI_UPDATES} - "
+                  f"Time: {train_duration:.3f}s, Transitions: {num_transitions}, "
+                  f"PolicyLoss: {avg_policy_loss:.4f}, ValueLoss: {avg_value_loss:.4f}, "
+                  f"KLLoss: {avg_kl_loss:.4f}")
+            running_loss += (avg_policy_loss + avg_value_loss + avg_kl_loss) * num_transitions
+            total_steps += num_transitions
+            avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
+            LAMBDA_KL *= KL_DECAY
+    while iteration < num_iterations and not stop_flag[0]:
+        try:
+            rollouts = rollout_queue.get(timeout=1.0)
+        except queue.Empty:
+            if stop_flag[0]:
+                break
+            continue
 
 # In train_rl_mp, note we remove p.daemon = True.
 def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
