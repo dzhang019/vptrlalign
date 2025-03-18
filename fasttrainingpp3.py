@@ -7,6 +7,7 @@ import threading
 import queue
 import multiprocessing as mp
 from multiprocessing import Process, Queue, Value
+import os
 
 import gym
 import minerl
@@ -965,43 +966,41 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     except KeyboardInterrupt:
         print("Interrupted by user, stopping threads and processes...")
     finally:
-        print("\nInitiating shutdown sequence...")
-        
-        # 1. Set stop flags
-        thread_stop[0] = True
+        finally:
+        print("\n=== EMERGENCY SHUTDOWN ===")
         stop_flag.value = True
-    
-        # 2. Stop threads with timeout
-        print("Stopping threads...")
-        train_thread.join(timeout=3.0)
-        env_thread.join(timeout=3.0)
-        
-        # 3. Terminate processes
-        print("Terminating workers...")
+        thread_stop[0] = True
+
+        # 1. Kill processes first
         for p in workers:
             if p.is_alive():
                 p.terminate()
         
-        # 4. Close queues after processes are dead
-        print("Closing queues...")
+        # 2. Close queues
         for q in action_queues:
             q.cancel_join_thread()
             q.close()
         result_queue.cancel_join_thread()
         result_queue.close()
         
-        # 5. Force cleanup
-        print("Final cleanup...")
-        for p in workers:
-            p.join(timeout=1.0)
+        # 3. Join threads
+        env_thread.join(timeout=1.0)
+        train_thread.join(timeout=1.0)
         
+        # 4. Force cleanup
+        th.cuda.empty_cache()
         dummy_env.close()
-        print(f"Saving weights to {out_weights}")
-        th.save(agent.policy.state_dict(), out_weights)
         
-        # Force exit if still hanging
+        # 5. Final save attempt
+        try:
+            th.save(agent.policy.state_dict(), out_weights)
+            print(f"Weights saved to {out_weights}")
+        except:
+            print("Failed to save weights")
+        
+        # 6. Force exit if needed
         if any(p.is_alive() for p in workers):
-            print("Force exiting due to hanging processes")
+            print("Forcing exit due to hanging processes")
             os._exit(1)
 
 
