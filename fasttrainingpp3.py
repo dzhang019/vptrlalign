@@ -216,19 +216,19 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
 
         # Send actions to all environments
         
-            if obs_list[env_id] is not None:
-                with th.no_grad():
-                    action_info = agent.get_action_and_training_info(
-                        minerl_obs=obs_list[env_id],
-                        hidden_state=hidden_states[env_id],
-                        stochastic=True,
-                        taken_action=None
-                    )
-                    minerl_action = action_info[0]
-                    new_hid = action_info[-1]
-                hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
-                action_queues[env_id].put(minerl_action)
-                env_waiting_for_result[env_id] = True
+        if obs_list[env_id] is not None:
+            with th.no_grad():
+                action_info = agent.get_action_and_training_info(
+                minerl_obs=obs_list[env_id],
+                    hidden_state=hidden_states[env_id],
+                    stochastic=True,
+                    taken_action=None
+                )
+                minerl_action = action_info[0]
+                new_hid = action_info[-1]
+            hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
+            action_queues[env_id].put(minerl_action)
+            env_waiting_for_result[env_id] = True
 
         total_transitions = 0
         result_timeout = 0.01
