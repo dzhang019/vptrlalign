@@ -488,10 +488,14 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
         workers.append(p)
         time.sleep(0.4)
     
-    thread_stop = [False]
+    # Add a delay to ensure worker processes have time to send INIT messages.
+    print("Waiting for worker processes to initialize...")
+    time.sleep(2)
+    
+    # Then start the threads.
     env_thread = threading.Thread(
         target=environment_thread,
-        args=(agent, rollout_steps, action_queues, result_queue, rollout_queue,
+        args=(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
               out_episodes, thread_stop, num_envs, phase_coordinator)
     )
     train_thread = threading.Thread(
