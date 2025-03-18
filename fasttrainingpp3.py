@@ -176,7 +176,8 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     while not stop_flag[0] and not all(done_list):
         if action_queues[env_id]._closed:  # Check if queue is closed
             break
-         try:
+            
+        try:
             action_queues[env_id].put(minerl_action)
         except ValueError as e:
             if "is closed" in str(e) and stop_flag[0]:
