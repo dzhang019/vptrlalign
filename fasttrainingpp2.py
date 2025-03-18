@@ -120,29 +120,38 @@ class PhaseCoordinator:
 # Environment worker process
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     try:
-        env = CustomHumanSurvival().make()
+        print(f"[Env {env_id}] Starting initialization...")
+        # Use the base environment class instead of the custom one for initial testing
+        env = minerl.environments.HumanSurvival().make()
+        print(f"[Env {env_id}] Environment created successfully")
         obs = env.reset()
+        print(f"[Env {env_id}] Environment reset successfully")
         result_queue.put(("INIT", env_id, obs, False, 0, None))
-        print(f"[Env {env_id}] Initialized successfully")
+        print(f"[Env {env_id}] Initialization message sent to result queue")
     except Exception as e:
-        print(f"[Env {env_id}] INIT ERROR: {str(e)}")
+        print(f"[Env {env_id}] INITIALIZATION ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         result_queue.put(("ERROR", env_id, None, True, 0, str(e)))
         return
 
-    print(f"[Env {env_id}] Started")
+    print(f"[Env {env_id}] Started and ready for actions")
     try:
         while not stop_flag.value:
             try:
                 action = action_queue.get(timeout=0.1)
                 if action is None or stop_flag.value:
                     break
+                
+                print(f"[Env {env_id}] Received action, executing step")
                 next_obs, env_reward, done, info = env.step(action)
-                # Removed env.render() to prevent hanging in headless environments
+                print(f"[Env {env_id}] Step complete, reward: {env_reward}")
+                
                 result_queue.put(("STEP", env_id, next_obs, done, env_reward, info),
                                  block=True, timeout=1.0)
+                
                 if done:
+                    print(f"[Env {env_id}] Episode done, resetting")
                     obs = env.reset()
                     result_queue.put(("RESET", env_id, obs, False, 0, None),
                                      block=True, timeout=1.0)
@@ -150,60 +159,81 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                 if stop_flag.value:
                     break
             except Exception as e:
-                print(f"[Env {env_id}] Critical error: {e}")
+                print(f"[Env {env_id}] Critical error during step: {e}")
+                import traceback
+                traceback.print_exc()
                 result_queue.put(("ERROR", env_id, None, True, 0, str(e)))
                 break
     finally:
         try:
+            print(f"[Env {env_id}] Closing environment")
             env.close()
         except:
             pass
         print(f"[Env {env_id}] Stopped")
 
 
+
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue,
                        out_episodes, stop_flag, num_envs, phase_coordinator):
-    # Prepare lists for all environments.
+    # Prepare lists for all environments
     obs_list = [None] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     last_actions = [None] * num_envs
     initialized = [False] * num_envs
 
-    # Drain the result queue for a fixed duration to capture INIT messages.
-    drain_duration = 3.0  # seconds
+    # Drain the result queue for a longer duration to capture INIT messages
+    drain_duration = 30.0  # Increase to 30 seconds from 3
     start_time = time.time()
-    print("Draining initialization messages for {:.1f} seconds...".format(drain_duration))
+    print(f"Draining initialization messages for {drain_duration:.1f} seconds...")
+    
     while time.time() - start_time < drain_duration:
         try:
-            # Use a short timeout to try draining repeatedly.
+            # Use a short timeout to try draining repeatedly
             msg = result_queue.get(timeout=0.5)
             msg_type, env_id, obs, done, reward, info = msg
+            
             if msg_type == "INIT" and obs is not None:
                 initialized[env_id] = True
                 obs_list[env_id] = obs
                 print(f"Collected INIT for env {env_id}")
+            elif msg_type == "ERROR":
+                print(f"Error initializing env {env_id}: {info}")
             else:
-                # For now, ignore non-INIT messages during initialization.
-                pass
+                # For now, ignore non-INIT messages during initialization
+                print(f"Received unexpected message type during init: {msg_type} from env {env_id}")
         except queue.Empty:
-            pass
-
+            # Check if we have any initialized environments already
+            if sum(initialized) > 0 and time.time() - start_time > 10.0:
+                print(f"Got {sum(initialized)} initialized environments after {time.time() - start_time:.1f}s, continuing...")
+                break
+            print(f"Waiting for initialization... ({time.time() - start_time:.1f}s elapsed)")
+            
     if sum(initialized) < num_envs:
         print(f"Warning: Only {sum(initialized)} out of {num_envs} environments initialized successfully: {initialized}")
         successful_envs = [i for i, init in enumerate(initialized) if init]
         if len(successful_envs) == 0:
+            print("No environments successfully initialized. Stopping.")
             stop_flag[0] = True
             return
-        # Filter lists to only include the successful environments.
+        
+        # Filter lists to only include the successful environments
+        print(f"Continuing with only the successful environments: {successful_envs}")
         obs_list = [obs_list[i] for i in successful_envs]
         episode_step_counts = [episode_step_counts[i] for i in successful_envs]
         hidden_states = [hidden_states[i] for i in successful_envs]
         last_actions = [last_actions[i] for i in successful_envs]
+        
+        # Create a new action_queues list with only the successful queues
+        filtered_action_queues = [action_queues[i] for i in successful_envs]
+        action_queues = filtered_action_queues
+        
+        # Update num_envs to the number of successful environments
         num_envs = len(successful_envs)
     else:
         print(f"All {num_envs} environments initialized successfully.")
-
+        
     # Optionally, try to fetch any additional INIT/RESET messages.
     for _ in range(num_envs):
         try:
@@ -451,6 +481,22 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     except RuntimeError:
         print("Multiprocessing start method already set")
     
+    # Create a thread-safe stop flag for the threads
+    thread_stop = [False]
+    
+    # Test with a basic environment first
+    print("Testing environment creation...")
+    try:
+        test_env = minerl.environments.HumanSurvival().make()
+        obs = test_env.reset()
+        print("Test environment created successfully")
+        print(f"Observation shape: {type(obs)}")
+        test_env.close()
+    except Exception as e:
+        print(f"ERROR: Failed to create test environment: {e}")
+        import traceback
+        traceback.print_exc()
+    
     dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
@@ -485,7 +531,33 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
         p.start()
         workers.append(p)
         time.sleep(0.4)
+    try:
+        dummy_env = minerl.environments.HumanSurvival(**ENV_KWARGS).make()
+    except Exception as e:
+        print(f"Warning: Failed to create dummy environment: {e}")
+        # Create a simpler environment as fallback
+        try:
+            dummy_env = minerl.environments.HumanSurvival().make()
+        except Exception as e2:
+            print(f"Critical error: Failed to create any environment: {e2}")
+            return
+
+    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
+    agent = MineRLAgent(
+        dummy_env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    agent.load_weights(in_weights)
+    pretrained_policy = MineRLAgent(
+        dummy_env, device="cuda",
+        policy_kwargs=agent_policy_kwargs,
+        pi_head_kwargs=agent_pi_head_kwargs
+    )
+    pretrained_policy.load_weights(in_weights)
     
+    # Create the phase coordinator
+    phase_coordinator = PhaseCoordinator()
     # Add a delay to ensure worker processes have time to send INIT messages.
     print(f"Starting {num_envs} environment processes with rollout steps={rollout_steps}")
     print("Waiting for worker processes to initialize...")
