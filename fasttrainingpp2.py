@@ -20,7 +20,7 @@ from lib.tree_util import tree_map
 
 # Instead of a fixed import for the reward function, you can later dynamically import one if desired.
 # For now we use:
-from lib.phase1 import reward_function
+#from lib.phase1 import reward_function
 
 # Import our modified compute_kl_loss (which now accepts a temperature T)
 from lib.policy_mod import compute_kl_loss
@@ -50,14 +50,14 @@ class CustomHumanSurvival(HumanSurvival):
         ])
         
         # Iron sword reward (+1000 once)
-        self.sword_reward = RewardForCollectingItems([
-            dict(type="iron_sword", amount=1, reward=1000.0)
-        ])
+        #self.sword_reward = RewardForCollectingItems([
+        #    dict(type="iron_sword", amount=1, reward=1000.0)
+        #])
         
         # Replace existing reward handlers
         self.reward_handlers = [
-            self.log_reward,
-            self.sword_reward,
+            self.log_reward#,
+            #self.sword_reward,
             # Keep other default handlers if needed
         ]        
 # Simple thread-safe queue for passing rollouts between threads
@@ -138,9 +138,9 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                 # Initialize reward_state if first step
                 if reward_state is None:
                     reward_state = {
-                        'prev_logs': 0,
-                        'has_sword': False,
-                        'given_sword_reward': False
+                        'prev_logs': 0#,
+                        #'has_sword': False,
+                        #'given_sword_reward': False
                     }
                 
                 # Calculate custom reward
@@ -186,9 +186,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     reward_state = {
-        'prev_logs': 0,
-        'has_sword': False,
-        'given_sword_reward': False
+        'prev_logs': 0#,
+        #'has_sword': False,
+        #'given_sword_reward': False
     }
     
     # Wait for initial observations
