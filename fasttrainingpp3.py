@@ -811,12 +811,12 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
     while iteration < num_iterations and not stop_flag[0]:
-    try:
-        rollouts = rollout_queue.get(timeout=5.0)
-    except queue.Empty:
-        if stop_flag[0]:
-            break
-        continue
+        try:
+            rollouts = rollout_queue.get(timeout=5.0)
+        except queue.Empty:
+            if stop_flag[0]:
+                break
+            continue
 
 # Multiprocessing version: train_rl_mp
 def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
