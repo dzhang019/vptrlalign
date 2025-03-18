@@ -207,9 +207,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         total_transitions = 0
         result_timeout = 0.01
         except queue.Empty:
-        if stop_flag[0]:  # Add early exit check
-            break
-        continue
+            if stop_flag[0]:  # Add early exit check
+                break
+            continue
 
         while total_transitions < rollout_steps * num_envs:
             if phase_coordinator.in_auxiliary_phase():
