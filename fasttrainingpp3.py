@@ -966,7 +966,7 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     except KeyboardInterrupt:
         print("Interrupted by user, stopping threads and processes...")
     finally:
-        finally:
+    
         print("\n=== EMERGENCY SHUTDOWN ===")
         stop_flag.value = True
         thread_stop[0] = True
