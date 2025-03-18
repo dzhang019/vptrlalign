@@ -139,7 +139,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
                 if action is None or stop_flag.value:
                     break
                 next_obs, env_reward, done, info = env.step(action)
-                env.render(mode='human')  # Force render flush
+                # Removed env.render() to prevent hanging in headless environments
                 result_queue.put(("STEP", env_id, next_obs, done, env_reward, info),
                                  block=True, timeout=1.0)
                 if done:
