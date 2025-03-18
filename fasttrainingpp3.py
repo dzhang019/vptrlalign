@@ -120,41 +120,42 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
     try:
         env = CustomHumanSurvival().make()
         obs = env.reset()
+        # Immediately send initial observation with confirmation
+        result_queue.put(("INIT", env_id, obs, False, 0, None), block=True, timeout=5.0)
     except Exception as e:
-        print(f"[Env {env_id}] Error during setup: {e}")
+        print(f"[Env {env_id}] Failed to initialize: {e}")
+        result_queue.put(("ERROR", env_id, None, True, 0, str(e)))
         return
-    
+
     print(f"[Env {env_id}] Started")
     try:
-        result_queue.put((env_id, None, obs, False, 0, None))
         while not stop_flag.value:
             try:
-                try:
-                    action = action_queue.get(timeout=0.1)
-                    if action is None or stop_flag.value:
-                        break
-                except queue.Empty:
-                    if stop_flag.value:
-                        break
-                    continue
-                    
-                # Add timeout to environment step
+                # Add timeout with explicit stop_flag check
+                action = action_queue.get(timeout=0.1)
+                if action is None or stop_flag.value:
+                    break
+                
+                # Add render flush to prevent hangs
                 next_obs, env_reward, done, info = env.step(action)
-                result_queue.put((env_id, action, next_obs, done, env_reward, info))
+                env.render(mode='human')  # Force render flush
+                
+                # Send result with timeout
+                result_queue.put(("STEP", env_id, next_obs, done, env_reward, info), 
+                               block=True, timeout=1.0)
                 
                 if done:
                     obs = env.reset()
-                    result_queue.put((env_id, None, obs, False, 0, None))
-    
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"[Env {env_id}] Error in step: {e}")
+                    result_queue.put(("RESET", env_id, obs, False, 0, None),
+                                   block=True, timeout=1.0)
+
+            except queue.Empty:
                 if stop_flag.value:
                     break
-    
-    except KeyboardInterrupt:
-        pass
+            except Exception as e:
+                print(f"[Env {env_id}] Critical error: {e}")
+                result_queue.put(("ERROR", env_id, None, True, 0, str(e)))
+                break
     finally:
         try:
             env.close()
@@ -167,7 +168,30 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     obs_list = [None] * num_envs
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
+
+    obs_list = [None] * num_envs
+    initialized = [False] * num_envs
+    start_time = time.time()
     
+    # Initialize environments with timeout
+    while time.time() - start_time < 30 and sum(initialized) < num_envs and not stop_flag[0]:
+        try:
+            msg_type, env_id, obs, done, reward, info = result_queue.get(timeout=1.0)
+            if msg_type == "INIT" and obs is not None:
+                obs_list[env_id] = obs
+                initialized[env_id] = True
+                print(f"Successfully initialized env {env_id}")
+            elif msg_type == "ERROR":
+                print(f"Failed to initialize env {env_id}: {info}")
+        except queue.Empty:
+            if stop_flag[0]:
+                return
+    
+    if sum(initialized) < num_envs:
+        print(f"Failed to initialize {num_envs - sum(initialized)} environments")
+        stop_flag[0] = True
+        return                     
+                          
     # Wait for initial observations
     for _ in range(num_envs):
         try:
