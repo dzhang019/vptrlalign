@@ -878,9 +878,9 @@ def train_rl_mp(in_model, in_weights, out_weights, out_episodes,
     except KeyboardInterrupt:
         print("Interrupted by user, stopping threads and processes...")
     finally:
-    print("Setting stop flag...")
-    thread_stop[0] = True
-    stop_flag.value = True
+        print("Setting stop flag...")
+        thread_stop[0] = True
+        stop_flag.value = True
     
     # Drain all queues
     rollout_queue.stop()
