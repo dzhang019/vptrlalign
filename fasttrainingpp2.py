@@ -1054,6 +1054,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 optimizer=optimizer,
                 scaler=scaler,
                 lwf_handler=lwf_handler,
+                train_unroll_fn=train_unroll,  # Pass the function here
                 value_loss_coef=VALUE_LOSS_COEF,
                 lambda_kl=LAMBDA_KL,
                 max_grad_norm=MAX_GRAD_NORM
