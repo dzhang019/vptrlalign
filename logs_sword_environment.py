@@ -2,53 +2,13 @@ import gym
 import numpy as np
 from minerl.herobraine.hero import handlers
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
-from minerl.herobraine.hero.handlers.agent import reward as reward_handlers
-from minerl.herobraine.hero.mc import ALL_ITEMS
+from minerl.herobraine.hero.handler import Handler
 
-class LogsAndIronSwordEnv(HumanSurvival):
+# Create a custom reward handler that implements all required methods
+class LogsAndSwordRewardHandler(Handler):
     def __init__(self):
         super().__init__()
-        
-        # Update the environment name
-        self.name = "LogsAndIronSword-v0"
-        
-        # Remove default reward handlers
-        self.reward_handlers = []
-        
-        # Format item rewards properly
-        # For simpler implementation, let's use a direct call to RewardHandler
-        self.reward_handlers.append(
-            handlers.RewardHandler(
-                reward_function=self.inventory_reward_function,
-                reward_shape=()
-            )
-        )
-        
-        # Add death penalty
-        self.reward_handlers.append(
-            handlers.RewardHandler(
-                reward_function=lambda obs, action, next_obs: -200.0 if next_obs.get("is_dead", False) else 0.0,
-                reward_shape=()
-            )
-        )
-        
-        # Ensure all required items are in the inventory observation
-        required_items = [
-            "log", "planks", "stick", "crafting_table", "wooden_pickaxe",
-            "cobblestone", "stone_pickaxe", "iron_ore", "coal", 
-            "furnace", "iron_ingot", "iron_sword"
-        ]
-        
-        # Make sure all required items are in the inventory handler
-        if hasattr(self, 'inventory_handler'):
-            for item in required_items:
-                if item not in self.inventory_handler.items:
-                    self.inventory_handler.items.append(item)
-    
-    def inventory_reward_function(self, obs, action, next_obs):
-        """Custom reward function for rewarding logs and iron sword collection"""
-        # Dictionary of item rewards
-        item_rewards = {
+        self.item_rewards = {
             "log": 10.0,            # Primary objective
             "iron_sword": 1000.0,   # Ultimate objective
             
@@ -68,23 +28,62 @@ class LogsAndIronSwordEnv(HumanSurvival):
             "furnace": 15.0,
             "iron_ingot": 75.0
         }
-        
+    
+    def to_string(self):
+        """Required method to describe the handler"""
+        return "LogsAndSwordRewardHandler"
+    
+    def from_universal(self, obs):
+        """Method to convert a universal observation to a reward"""
         reward = 0.0
         
-        # Check if we have inventory in both current and next observation
-        if "inventory" in obs and "inventory" in next_obs:
-            # Calculate rewards based on inventory changes
-            for item, item_reward in item_rewards.items():
-                prev_count = obs["inventory"].get(item, 0)
-                curr_count = next_obs["inventory"].get(item, 0)
-                
-                # Reward for newly obtained items
-                if curr_count > prev_count:
-                    items_gained = curr_count - prev_count
-                    reward += items_gained * item_reward
-                    print(f"Obtained {items_gained} {item}! Reward: +{items_gained * item_reward}")
+        # Check if we have inventory
+        if "inventory" in obs:
+            inventory = obs["inventory"]
+            
+            # Calculate rewards based on inventory
+            for item, item_reward in self.item_rewards.items():
+                if item in inventory and inventory[item] > 0:
+                    # Give reward based on current count
+                    # This is a simplification since we don't track previous counts
+                    count = inventory[item]
+                    reward += count * item_reward / 10.0  # Scale to avoid double counting
+                    
+                    # Print for significant items
+                    if item in ["log", "iron_sword"]:
+                        print(f"Has {count} {item}! Reward contribution: {count * item_reward / 10.0}")
         
         return reward
+    
+    def reset(self):
+        """Method called when the environment is reset"""
+        pass
+
+class LogsAndIronSwordEnv(HumanSurvival):
+    def __init__(self):
+        super().__init__()
+        
+        # Update the environment name
+        self.name = "LogsAndIronSword-v0"
+        
+        # Remove default reward handlers
+        self.reward_handlers = []
+        
+        # Add our custom reward handler
+        self.reward_handlers.append(LogsAndSwordRewardHandler())
+        
+        # Ensure all required items are in the inventory observation
+        required_items = [
+            "log", "planks", "stick", "crafting_table", "wooden_pickaxe",
+            "cobblestone", "stone_pickaxe", "iron_ore", "coal", 
+            "furnace", "iron_ingot", "iron_sword"
+        ]
+        
+        # Make sure all required items are in the inventory handler
+        if hasattr(self, 'inventory_handler'):
+            for item in required_items:
+                if item not in self.inventory_handler.items:
+                    self.inventory_handler.items.append(item)
 
 def register_logs_sword_env():
     """Register the custom environment"""
@@ -94,6 +93,7 @@ def register_logs_sword_env():
     try:
         if env_id in gym.envs.registry.env_specs:
             del gym.envs.registry.env_specs[env_id]
+        print(f"Unregistered existing {env_id}")
     except:
         pass
     
