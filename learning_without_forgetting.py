@@ -120,11 +120,12 @@ class LwFHandler:
             return th.tensor(0.0, device="cuda")
 
 def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, scaler, 
-                          lwf_handler, train_unroll_fn, value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0):
+                          lwf_handler, train_unroll_fn, compute_kl_loss_fn, value_loss_coef=0.5, 
+                          lambda_kl=0.2, max_grad_norm=1.0):
     """
     Extended version of run_policy_update that includes Learning Without Forgetting.
     
-    Args:
+  Args:
         agent: The agent being trained
         pretrained_policy: Reference policy for KL divergence
         rollouts: List of rollouts to use for optimization
@@ -132,6 +133,7 @@ def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, sc
         scaler: Gradient scaler for mixed precision training
         lwf_handler: LwF handler for distillation loss
         train_unroll_fn: Function to process rollouts into transitions
+        compute_kl_loss_fn: Function to compute KL divergence loss
         value_loss_coef: Coefficient for value function loss
         lambda_kl: Coefficient for KL divergence loss
         max_grad_norm: Maximum gradient norm for clipping
@@ -187,7 +189,7 @@ def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, sc
             # KL divergence loss between current and initial policy
             kl_losses = []
             for t in env_transitions:
-                kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
+                kl_loss = compute_kl_loss_fn(t["cur_pd"], t["old_pd"])
                 kl_losses.append(kl_loss)
             kl_loss = th.stack(kl_losses).mean()
             
