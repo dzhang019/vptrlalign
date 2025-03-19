@@ -87,7 +87,8 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
         while not stop_flag.value:
             try:
                 action = action_queue.get(timeout=0.1)
-                if action is None: break
+                if action is None: 
+                    break
                 
                 next_obs, _, done, info = env.step(action)
                 
@@ -161,7 +162,8 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 rollouts[env_id]["rewards"].append(reward)
                 rollouts[env_id]["dones"].append(done)
                 rollouts[env_id]["hidden_states"].append(
-                    tree_map(lambda x: x.detach().cpu(), hidden_states[env_id]))
+                    tree_map(lambda x: x.detach().cpu(), hidden_states[env_id])
+                )
                 rollouts[env_id]["next_obs"].append(next_obs)
                 
                 obs_list[env_id] = next_obs
@@ -181,18 +183,20 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     
     # Get current policy outputs
     with th.no_grad():
-        _, values, _, _ = agent.get_sequence_and_training_info(
+        policy_out = agent.get_sequence_and_training_info(
             rollout["obs"], 
             rollout["hidden_states"][0], 
             rollout["actions"]
         )
+        values = policy_out[1]
         
         # Get pretrained policy outputs for KL divergence
-        _, old_values, _, _ = pretrained_policy.get_sequence_and_training_info(
+        old_policy_out = pretrained_policy.get_sequence_and_training_info(
             rollout["obs"], 
             pretrained_policy.policy.initial_state(1), 
             rollout["actions"]
         )
+        old_values = old_policy_out[1]
     
     # Calculate advantages
     advantages = []
@@ -208,8 +212,8 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         "value": values[t],
         "advantage": advantages[::-1][t],
         "old_value": old_values[t],
-        "old_pd": {k: v[t] for k, v in old_policy.items()},
-        "cur_pd": {k: v[t] for k, v in current_policy.items()}
+        "old_pd": {k: v[t] for k, v in old_policy_out[0].items()},
+        "cur_pd": {k: v[t] for k, v in policy_out[0].items()}
     } for t in range(T)]
 
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator):
@@ -293,13 +297,13 @@ def train_rl_mp(
     agent = MineRLAgent(dummy_env, device="cuda", 
                        policy_kwargs=agent_policy_kwargs,
                        pi_head_kwargs=agent_pi_head_kwargs)
-    agent.load_weights(in_weights)  # Fixed: removed weights_only
+    agent.load_weights(in_weights)
     
     # Load pretrained policy
     pretrained_policy = MineRLAgent(dummy_env, device="cuda",
                                    policy_kwargs=agent_policy_kwargs,
                                    pi_head_kwargs=agent_pi_head_kwargs)
-    pretrained_policy.load_weights(in_weights)  # Fixed: removed weights_only
+    pretrained_policy.load_weights(in_weights)
     
     # Setup coordination
     coordinator = PhaseCoordinator()
@@ -310,7 +314,7 @@ def train_rl_mp(
     
     # Start workers
     workers = []
-    for env_id in range(num_envs)):
+    for env_id in range(num_envs):
         p = Process(target=env_worker, 
                    args=(env_id, action_queues[env_id], result_queue, stop_flag))
         p.start()
