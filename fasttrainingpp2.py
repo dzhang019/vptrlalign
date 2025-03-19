@@ -17,7 +17,7 @@ from data_loader import DataLoader
 from lib.tree_util import tree_map
 
 #from lib.phase1 import reward_function
-from logs_sword_reward import custom_reward_function_for_logs_and_sword as custom_reward_function
+from lib.phase_rewards import phase1_rewards, phase2_rewards, phase3_rewards, phase4_rewards, phase5_rewards
 from learning_without_forgetting import LwFHandler, run_policy_update_with_lwf
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
@@ -262,7 +262,7 @@ class PhaseCoordinator:
             return rollouts
 
 
-def env_worker(env_id, action_queue, result_queue, stop_flag):
+def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     # Create environment
     #env = gym.make("LogsAndIronSword-v0")
     env = HumanSurvival(**ENV_KWARGS).make()
@@ -296,7 +296,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             
             # Calculate custom reward
             #custom_reward = env_reward
-            custom_reward, visited_chunks = custom_reward_function(
+            custom_reward, visited_chunks = reward_function(
                 next_obs, done, info, visited_chunks
             )
             
@@ -1217,11 +1217,30 @@ def train_rl_mp(
     num_iterations=10,
     rollout_steps=40,
     num_envs=2,
-    queue_size=3
+    queue_size=3,
+    phase=1
 ):
     """
     Multiprocessing version with separate processes for environment stepping
     """
+     # Select reward function based on phase
+    if phase == 1:
+        reward_function = phase1_rewards
+        print("Using Phase 1 rewards: Focus on logs")
+    elif phase == 2:
+        reward_function = phase2_rewards
+        print("Using Phase 2 rewards: Focus on planks")
+    elif phase == 3:
+        reward_function = phase3_rewards
+        print("Using Phase 3 rewards: Focus on crafting tables")
+    elif phase == 4:
+        reward_function = phase4_rewards
+        print("Using Phase 4 rewards: Focus on sticks")
+    elif phase == 5:
+        reward_function = phase5_rewards
+        print("Using Phase 5 rewards: Focus on iron processing")
+    else:
+        raise ValueError(f"Invalid phase: {phase}")
     #register_logs_sword_env()
     # Set spawn method for multiprocessing
     try:
@@ -1264,7 +1283,7 @@ def train_rl_mp(
     for env_id in range(num_envs):
         p = Process(
             target=env_worker,
-            args=(env_id, action_queues[env_id], result_queue, stop_flag)
+            args=(env_id, action_queues[env_id], result_queue, stop_flag, reward_function)
         )
         p.daemon = True
         p.start()
@@ -1356,6 +1375,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-envs", required=False, type=int, default=4)
     parser.add_argument("--queue-size", required=False, type=int, default=3,
                        help="Size of the queue between environment and training threads")
+    parser.add_argument("--phase", type=int, default=1, choices=[1, 2, 3, 4, 5],
+                   help="Training phase (1-5)")
 
     args = parser.parse_args()
     
@@ -1372,5 +1393,6 @@ if __name__ == "__main__":
         num_iterations=args.num_iterations,
         rollout_steps=args.rollout_steps,
         num_envs=args.num_envs,
-        queue_size=args.queue_size
+        queue_size=args.queue_size,
+        phase=1
     )
