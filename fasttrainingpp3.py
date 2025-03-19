@@ -161,7 +161,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 rollouts[env_id]["rewards"].append(reward)
                 rollouts[env_id]["dones"].append(done)
                 rollouts[env_id]["hidden_states"].append(
-                    tree_map(lambda x: x.detach().cpu(), hidden_states[env_id])
+                    tree_map(lambda x: x.detach().cpu(), hidden_states[env_id]))
                 rollouts[env_id]["next_obs"].append(next_obs)
                 
                 obs_list[env_id] = next_obs
