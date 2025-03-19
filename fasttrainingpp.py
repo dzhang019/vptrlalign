@@ -1,3 +1,4 @@
+
 from argparse import ArgumentParser
 import pickle
 import time
@@ -15,8 +16,8 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-from lib.phase1 import reward_function
-#from lib.reward_structure_mod import custom_reward_function
+from lib.height import reward_function
+from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
@@ -1109,13 +1110,13 @@ def train_rl_mp(
         
         # Wait for threads to finish
         print("Waiting for threads to finish...")
-        env_thread.join(timeout=10) #Might need to change timeout values
+        env_thread.join(timeout=10)
         train_thread.join(timeout=5)
         
         # Wait for workers to finish
         print("Waiting for worker processes to finish...")
         for i, p in enumerate(workers):
-            p.join(timeout=5) # Might need to change this
+            p.join(timeout=5)
             if p.is_alive():
                 print(f"Worker {i} did not terminate, force killing...")
                 p.terminate()
