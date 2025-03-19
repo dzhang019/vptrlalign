@@ -1062,7 +1062,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             total_steps += num_transitions
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
-def train_rl_mp_with_custom_env(
+def train_rl_mp(
     in_model,
     in_weights,
     out_weights,
