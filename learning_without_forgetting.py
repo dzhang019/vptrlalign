@@ -120,7 +120,7 @@ class LwFHandler:
             return th.tensor(0.0, device="cuda")
 
 def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, scaler, 
-                          lwf_handler, value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0):
+                          lwf_handler, train_unroll_fn, value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0):
     """
     Extended version of run_policy_update that includes Learning Without Forgetting.
     
@@ -131,6 +131,7 @@ def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, sc
         optimizer: The optimizer to use
         scaler: Gradient scaler for mixed precision training
         lwf_handler: LwF handler for distillation loss
+        train_unroll_fn: Function to process rollouts into transitions
         value_loss_coef: Coefficient for value function loss
         lambda_kl: Coefficient for KL divergence loss
         max_grad_norm: Maximum gradient norm for clipping
@@ -154,7 +155,7 @@ def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, sc
             continue
         
         # Process rollout into transitions
-        env_transitions = train_unroll(
+        env_transitions = train_unroll_fn(
             agent,
             pretrained_policy,
             env_rollout,
