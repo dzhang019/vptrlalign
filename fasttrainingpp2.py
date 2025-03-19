@@ -17,6 +17,7 @@ from lib.tree_util import tree_map
 
 #from lib.phase1 import reward_function
 from logs_sword_reward import custom_reward_function_for_logs_and_sword as custom_reward_function
+from learning_without_forgetting import LwFHandler, run_policy_update_with_lwf
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
@@ -951,6 +952,12 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     PPG_ENABLED = True  # Enable/disable PPG
     PPG_N_PI_UPDATES = 8  # Number of policy updates before auxiliary phase
     PPG_BETA_CLONE = 1.0  # Weight for the policy distillation loss
+
+    lwf_handler = LwFHandler(
+        teacher_model=pretrained_policy,  # Use the original policy as the teacher
+        temperature=2.0,                  # Temperature for softening the distributions
+        lambda_distill=0.5                # Weight of the distillation loss
+    )
     
     # Setup optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
@@ -1040,12 +1047,13 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             print(f"[Training Thread] Processing rollouts for iteration {iteration}")
             
             # Run policy update
-            avg_policy_loss, avg_value_loss, avg_kl_loss, num_transitions = run_policy_update(
+            avg_policy_loss, avg_value_loss, avg_kl_loss, avg_distill_loss, num_transitions = run_policy_update_with_lwf(
                 agent=agent,
                 pretrained_policy=pretrained_policy,
                 rollouts=rollouts,
                 optimizer=optimizer,
                 scaler=scaler,
+                lwf_handler=lwf_handler,
                 value_loss_coef=VALUE_LOSS_COEF,
                 lambda_kl=LAMBDA_KL,
                 max_grad_norm=MAX_GRAD_NORM
@@ -1057,13 +1065,14 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             print(f"[Training Thread] Policy Phase {pi_update_counter}/{PPG_N_PI_UPDATES} - "
                   f"Time: {train_duration:.3f}s, Transitions: {num_transitions}, "
                   f"PolicyLoss: {avg_policy_loss:.4f}, ValueLoss: {avg_value_loss:.4f}, "
-                  f"KLLoss: {avg_kl_loss:.4f}")
+                  f"KLLoss: {avg_kl_loss:.4f}, DistillLoss: {avg_distill_loss:.4f}")
             
             # Update running stats
             running_loss += (avg_policy_loss + avg_value_loss + avg_kl_loss) * num_transitions
             total_steps += num_transitions
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
+
 def train_rl_mp(
     in_model,
     in_weights,
