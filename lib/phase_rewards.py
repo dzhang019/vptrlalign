@@ -1,26 +1,38 @@
-def phase1_rewards(next_obs, done, info, visited_chunks=None):
+def phase1_rewards(next_obs, done, info, visited_chunks=None, prev_inventory=None):
     """
-    Phase 1: Focus on log collection with future goal hints
+    Phase 1: Focus on log collection with future goal hints and penalties for decreasing logs
     """
     # Initialize reward and visited chunks
     reward = 0.0
     if visited_chunks is None:
         visited_chunks = set()
     
-    # Calculate inventory-based rewards
+    # Store current inventory for comparison with next step
+    current_inventory = {}
+    
+    # Calculate inventory-based rewards and penalties
     if "inventory" in next_obs:
         inventory = next_obs["inventory"]
+        current_inventory = {k: v for k, v in inventory.items()}  # Store for next call
         
         # PRIMARY FOCUS: Massive reward for logs
         if "log" in inventory and inventory["log"] > 0:
-            reward += inventory["log"] * 50.0  # Very high reward for logs
+            # Base reward
+            reward += inventory["log"] * 50.0
             print(f"Logs: {inventory['log']} - Reward: +{inventory['log'] * 50.0}")
+            
+            # Check if logs decreased since last observation
+            if prev_inventory is not None and "log" in prev_inventory:
+                if inventory["log"] < prev_inventory["log"]:
+                    logs_lost = prev_inventory["log"] - inventory["log"]
+                    penalty = logs_lost * 150.0  # 3x penalty for losing logs
+                    reward -= penalty
+                    print(f"Lost {logs_lost} logs! Penalty: -{penalty}")
         
-        # FUTURE HINTS: Small rewards for next steps in crafting chain
+        # Other rewards as before...
         if "planks" in inventory and inventory["planks"] > 0:
             reward += inventory["planks"] * 1.0  # Small hint
         
-        # ULTIMATE GOAL: Massive reward for iron sword
         if "iron_sword" in inventory and inventory["iron_sword"] > 0:
             reward += 5000.0  # Massive reward
             print(f"IRON SWORD CRAFTED! Bonus: +5000.0")
@@ -39,7 +51,7 @@ def phase1_rewards(next_obs, done, info, visited_chunks=None):
     if done:
         reward -= 100.0
     
-    return reward, visited_chunks
+    return reward, visited_chunks, current_inventory
 
 def phase2_rewards(next_obs, done, info, visited_chunks=None):
     """
