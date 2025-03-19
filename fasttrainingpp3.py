@@ -23,12 +23,14 @@ from lib.policy_mod import compute_kl_loss
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
+
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
     policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
     pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
     pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
     return policy_kwargs, pi_head_kwargs
+
 
 class RolloutQueue:
     def __init__(self, maxsize=10):
@@ -39,6 +41,7 @@ class RolloutQueue:
     
     def get(self):
         return self.queue.get(block=True)
+
 
 class PhaseCoordinator:
     def __init__(self):
@@ -70,6 +73,7 @@ class PhaseCoordinator:
             rollouts = self.rollout_buffer
             self.rollout_buffer = []
             return rollouts
+
 
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -118,6 +122,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
     except Exception as e:
         print(f"[Env {env_id}] Error: {str(e)}")
 
+
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
                        out_episodes, stop_flag, num_envs, phase_coordinator):
     obs_list = [None] * num_envs
@@ -133,10 +138,8 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
             continue
         
-        rollouts = [{
-            "obs": [], "actions": [], "rewards": [], 
-            "dones": [], "hidden_states": [], "next_obs": []
-        } for _ in range(num_envs)]
+        rollouts = [{"obs": [], "actions": [], "rewards": [], 
+                     "dones": [], "hidden_states": [], "next_obs": []} for _ in range(num_envs)]
         
         # Generate actions for all environments
         for env_id in range(num_envs):
@@ -174,6 +177,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         
         if not phase_coordinator.in_auxiliary_phase():
             rollout_queue.put(rollouts)
+
 
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     transitions = []
@@ -216,6 +220,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         "cur_pd": {k: v[t] for k, v in policy_out[0].items()}
     } for t in range(T)]
 
+
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator):
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=3e-6)
     scaler = GradScaler()
@@ -244,7 +249,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 old_values = th.tensor([t["old_value"] for t in batch], device="cuda")
                 
                 # Policy loss
-                ratios = th.exp(agent.policy.log_prob(batch) - th.exp(pretrained_policy.policy.log_prob(batch))
+                ratios = th.exp(agent.policy.log_prob(batch) - pretrained_policy.policy.log_prob(batch))
                 surr1 = ratios * advantages
                 surr2 = th.clamp(ratios, 0.8, 1.2) * advantages
                 policy_loss += -th.min(surr1, surr2).mean()
@@ -267,6 +272,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         print(f"  Policy Loss: {policy_loss.item():.2f}")
         print(f"  Value Loss: {value_loss.item():.2f}")
         print(f"  KL Divergence: {kl_loss.item():.2f}")
+
 
 def train_rl_mp(
     in_model,
@@ -295,14 +301,14 @@ def train_rl_mp(
     # Load agent
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     agent = MineRLAgent(dummy_env, device="cuda", 
-                       policy_kwargs=agent_policy_kwargs,
-                       pi_head_kwargs=agent_pi_head_kwargs)
+                        policy_kwargs=agent_policy_kwargs,
+                        pi_head_kwargs=agent_pi_head_kwargs)
     agent.load_weights(in_weights)
     
     # Load pretrained policy
     pretrained_policy = MineRLAgent(dummy_env, device="cuda",
-                                   policy_kwargs=agent_policy_kwargs,
-                                   pi_head_kwargs=agent_pi_head_kwargs)
+                                    policy_kwargs=agent_policy_kwargs,
+                                    pi_head_kwargs=agent_pi_head_kwargs)
     pretrained_policy.load_weights(in_weights)
     
     # Setup coordination
@@ -316,19 +322,19 @@ def train_rl_mp(
     workers = []
     for env_id in range(num_envs):
         p = Process(target=env_worker, 
-                   args=(env_id, action_queues[env_id], result_queue, stop_flag))
+                    args=(env_id, action_queues[env_id], result_queue, stop_flag))
         p.start()
         workers.append(p)
         time.sleep(0.5)  # Stagger environment starts
     
     # Start threads
     train_thread = threading.Thread(target=training_thread,
-                                   args=(agent, pretrained_policy, rollout_queue, 
-                                        [False], num_iterations, coordinator))
+                                    args=(agent, pretrained_policy, rollout_queue, 
+                                          [False], num_iterations, coordinator))
     env_thread = threading.Thread(target=environment_thread,
-                                 args=(agent, rollout_steps, action_queues,
-                                      result_queue, rollout_queue, out_episodes,
-                                      [False], num_envs, coordinator))
+                                  args=(agent, rollout_steps, action_queues,
+                                        result_queue, rollout_queue, out_episodes,
+                                        [False], num_envs, coordinator))
     
     env_thread.start()
     train_thread.start()
@@ -344,6 +350,7 @@ def train_rl_mp(
                 p.terminate()
         dummy_env.close()
         th.save(agent.policy.state_dict(), out_weights)
+
 
 if __name__ == "__main__":
     parser = ArgumentParser()
