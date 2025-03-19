@@ -235,7 +235,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         for batch in DataLoader(all_transitions, batch_size=256, shuffle=True):
             with autocast():
                 advantages = th.tensor([t["advantage"] for t in batch], device="cuda")
-                ratios = th.exp(agent.policy.log_prob(batch) - th.exp(pretrained_policy.policy.log_prob(batch))
+                ratios = th.exp(agent.policy.log_prob(batch) - th.exp(pretrained_policy.policy.log_prob(batch)))
                 surr1 = ratios * advantages
                 surr2 = th.clamp(ratios, 1-CLIP_EPSILON, 1+CLIP_EPSILON) * advantages
                 
