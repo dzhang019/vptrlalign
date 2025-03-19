@@ -15,8 +15,8 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-#from lib.phase1 import reward_function
-from lib.reward_structure_mod import custom_reward_function
+from lib.phase1 import reward_function
+#from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
