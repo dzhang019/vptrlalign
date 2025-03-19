@@ -1077,7 +1077,7 @@ def train_rl_mp(
     """
     Multiprocessing version with separate processes for environment stepping
     """
-    register_logs_sword_env()
+    #register_logs_sword_env()
     # Set spawn method for multiprocessing
     try:
         mp.set_start_method('spawn', force=True)
