@@ -20,11 +20,11 @@ from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
-from custom_minerl_env import LogsAndIronSwordEnv, register_custom_env
+from logs_sword_environment import LogsAndIronSwordEnv, register_logs_sword_env
 from torch.cuda.amp import autocast, GradScaler
 
 # Modified version to integrate with your existing code
-def custom_reward_function_for_logs_and_sword(next_obs, done, info, visited_chunks=None):
+def custom_reward(next_obs, done, info, visited_chunks=None):
     """
     Custom reward function for the Logs and Iron Sword objectives.
     This is designed to integrate with your existing training pipeline.
@@ -149,7 +149,7 @@ class PhaseCoordinator:
 
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     # Create environment
-    env = LogsAndIronSwordEnv().make()
+    env = gym.make("LogsAndIronSword-v0")
     
     # Initialize
     obs = env.reset()
@@ -179,9 +179,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             step_count += 1
             
             # Calculate custom reward
-            custom_reward, visited_chunks = custom_reward_function_for_logs_and_sword(
-                next_obs, done, info, visited_chunks
-            )
+            custom_reward = env_reward
             
             # Apply death penalty if done
             if done:
@@ -1075,7 +1073,7 @@ def train_rl_mp(
     """
     Multiprocessing version with separate processes for environment stepping
     """
-    register_custom_env()
+    register_logs_sword_env()
     # Set spawn method for multiprocessing
     try:
         mp.set_start_method('spawn', force=True)
