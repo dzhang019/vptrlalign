@@ -15,13 +15,81 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-# Removed custom reward function import:
-# from lib.reward_structure_mod import custom_reward_function
+#from lib.phase1 import reward_function
+from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+from lib.phase1 import LogsAndIronSwordEnv, register_custom_env
 from torch.cuda.amp import autocast, GradScaler
 
+# Modified version to integrate with your existing code
+def custom_reward_function_for_logs_and_sword(next_obs, done, info, visited_chunks=None):
+    """
+    Custom reward function for the Logs and Iron Sword objectives.
+    This is designed to integrate with your existing training pipeline.
+    
+    Args:
+        next_obs: Current observation
+        done: Whether the episode is done
+        info: Additional info from the environment
+        visited_chunks: Set of visited chunks (for exploration rewards)
+        
+    Returns:
+        reward: The calculated reward
+        visited_chunks: Updated visited chunks set
+    """
+    # Initialize reward
+    reward = 0.0
+    
+    # Initialize visited_chunks if None
+    if visited_chunks is None:
+        visited_chunks = set()
+    
+    # Calculate inventory-based rewards
+    inventory = next_obs.get("inventory", {})
+    
+    # Define reward values for different items
+    item_rewards = {
+        "log": 10.0,           # Good reward for logs (primary objective)
+        "planks": 2.0,
+        "stick": 3.0,
+        "crafting_table": 5.0,
+        "wooden_pickaxe": 15.0,
+        "stone": 1.0,
+        "cobblestone": 2.0,
+        "stone_pickaxe": 25.0,
+        "iron_ore": 50.0,
+        "coal": 10.0,
+        "furnace": 15.0,
+        "iron_ingot": 75.0,
+        "iron_sword": 1000.0   # Massive reward for iron sword (ultimate objective)
+    }
+    
+    # Get current inventory count for relevant items
+    for item, reward_value in item_rewards.items():
+        if item in inventory and inventory[item] > 0:
+            # We don't know previous inventory from this function signature,
+            # so assume this is the first time we're seeing this item
+            reward += inventory[item] * reward_value
+    
+    # Add exploration reward based on visited chunks (from original code)
+    if "xpos" in next_obs and "zpos" in next_obs:
+        # Get current chunk coordinates
+        x_chunk = int(next_obs["xpos"] // 16)
+        z_chunk = int(next_obs["zpos"] // 16)
+        chunk_pos = (x_chunk, z_chunk)
+        
+        # Reward for exploring new chunks
+        if chunk_pos not in visited_chunks:
+            visited_chunks.add(chunk_pos)
+            reward += 1.0  # Small reward for exploration
+    
+    # Penalty for death
+    if done:
+        reward -= 200.0  # Significant penalty for dying
+    
+    return reward, visited_chunks
 
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
@@ -81,10 +149,11 @@ class PhaseCoordinator:
 
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     # Create environment
-    env = HumanSurvival(**ENV_KWARGS).make()
+    env = LogsAndIronSwordEnv().make()
     
     # Initialize
     obs = env.reset()
+    visited_chunks = set()
     episode_step_count = 0
     
     print(f"[Env {env_id}] Started")
@@ -106,26 +175,30 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             step_start = time.time()
             next_obs, env_reward, done, info = env.step(action)
             step_time = time.time() - step_start
+            #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
             
-            # Use MineRL's built-in reward for obtaining items (already computed in env_reward)
-            item_reward = env_reward
+            # Calculate custom reward
+            custom_reward, visited_chunks = custom_reward_function_for_logs_and_sword(
+                next_obs, done, info, visited_chunks
+            )
             
             # Apply death penalty if done
             if done:
-                item_reward -= 2000.0
-            
+                custom_reward -= 2000.0
+                
             # Increment step count
             episode_step_count += 1
             
             # Send results back
-            result_queue.put((env_id, action, next_obs, done, item_reward, info))
+            result_queue.put((env_id, action, next_obs, done, custom_reward, info))
             if env_id == 0:
                 env.render()
             # Reset if episode is done
             if done:
                 result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
                 obs = env.reset()
+                visited_chunks = set()
                 episode_step_count = 0
                 result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
             else:
@@ -136,6 +209,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
         except Exception as e:
             print(f"[Env {env_id}] Error: {e}")
             
+    # Clean up
     print(f"[Env {env_id}] Processed {step_count} steps")
     env.close()
     print(f"[Env {env_id}] Stopped")
@@ -443,6 +517,7 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
     return recent_rollouts
 
 
+# Run a PPG sleep phase
 # Run a PPG sleep phase
 def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
     """Run the PPG auxiliary phase with proper memory cleanup between rollouts."""
@@ -987,8 +1062,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             total_steps += num_transitions
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
-
-def train_rl_mp(
+def train_rl_mp_with_custom_env(
     in_model,
     in_weights,
     out_weights,
@@ -1001,6 +1075,7 @@ def train_rl_mp(
     """
     Multiprocessing version with separate processes for environment stepping
     """
+    register_custom_env()
     # Set spawn method for multiprocessing
     try:
         mp.set_start_method('spawn', force=True)
@@ -1008,7 +1083,7 @@ def train_rl_mp(
         print("Multiprocessing start method already set")
     
     # Create dummy environment for agent initialization
-    dummy_env = HumanSurvival(**ENV_KWARGS).make()
+    dummy_env = gym.make("LogsAndIronSword-v0")
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
     # Create agent for main thread
