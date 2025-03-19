@@ -16,11 +16,11 @@ from data_loader import DataLoader
 from lib.tree_util import tree_map
 
 #from lib.phase1 import reward_function
-from lib.reward_structure_mod import custom_reward_function
+from logs_sword_reward import custom_reward_function_for_logs_and_sword as custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
-from logs_sword_environment import LogsAndIronSwordEnv, register_logs_sword_env
+#from logs_sword_environment import LogsAndIronSwordEnv, register_logs_sword_env
 from torch.cuda.amp import autocast, GradScaler
 
 # Modified version to integrate with your existing code
@@ -149,7 +149,8 @@ class PhaseCoordinator:
 
 def env_worker(env_id, action_queue, result_queue, stop_flag):
     # Create environment
-    env = gym.make("LogsAndIronSword-v0")
+    #env = gym.make("LogsAndIronSword-v0")
+    env = HumanSurvival(**ENV_KWARGS).make()
     
     # Initialize
     obs = env.reset()
@@ -179,7 +180,10 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             step_count += 1
             
             # Calculate custom reward
-            custom_reward = env_reward
+            #custom_reward = env_reward
+            custom_reward, visited_chunks = custom_reward_function(
+                next_obs, done, info, visited_chunks
+            )
             
             # Apply death penalty if done
             if done:
@@ -1081,7 +1085,8 @@ def train_rl_mp(
         print("Multiprocessing start method already set")
     
     # Create dummy environment for agent initialization
-    dummy_env = gym.make("LogsAndIronSword-v0")
+    #dummy_env = gym.make("LogsAndIronSword-v0")
+    dummy_env = HumanSurvival(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
     # Create agent for main thread
