@@ -20,12 +20,12 @@ echo "Installing PyTorch..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 #install gym, gym3, attr, attrs
-pip install gym gym3 aatr attrs
+pip install gym gym3 attr attrs
 
 #install models and weight files in current directory
-#wget "https://openaipublic.blob.core.windows.net/minecraft-rl/models/foundation-model-2x.model" #2x model
+wget "https://openaipublic.blob.core.windows.net/minecraft-rl/models/foundation-model-2x.model" #2x model
 #wget "https://openaipublic.blob.core.windows.net/minecraft-rl/models/rl-from-early-game-2x.weights" #early game weights
-#wget "https://openaipublic.blob.core.windows.net/minecraft-rl/models/bc-house-3x.weights" #house weights
+wget "https://openaipublic.blob.core.windows.net/minecraft-rl/models/rl-from-house-2x.weights" #house weights
 
 # Check if requirements.txt exists and install dependencies
 REQUIREMENTS_FILE="requirements.txt"
