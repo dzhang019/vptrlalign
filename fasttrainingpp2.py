@@ -309,8 +309,8 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
             
             # Send results back
             result_queue.put((env_id, action, next_obs, done, custom_reward, info))
-            if env_id == 0:
-                env.render()
+            #if env_id == 0:
+                #env.render()
             # Reset if episode is done
             if done:
                 result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
