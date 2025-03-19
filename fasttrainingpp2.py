@@ -1076,9 +1076,9 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         phase_coordinator: Coordinator for synchronizing phases between threads
     """
     # Hyperparameters
-    LEARNING_RATE = 5e-6
+    LEARNING_RATE = 3e-7
     MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 20.0
+    LAMBDA_KL = 50.0
     GAMMA = 0.9999
     LAM = 0.95
     VALUE_LOSS_COEF = 0.5
@@ -1091,7 +1091,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
 
     lwf_handler = LwFHandler(
         teacher_model=pretrained_policy,
-        temperature=2.0,
+        temperature=1.0,
         lambda_distill=0.5
     )
     
