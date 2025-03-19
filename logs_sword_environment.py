@@ -84,7 +84,7 @@ class LogsAndIronSwordEnv(HumanSurvival):
             for item in required_items:
                 if item not in self.inventory_handler.items:
                     self.inventory_handler.items.append(item)
-
+                    
 def register_logs_sword_env():
     """Register the custom environment"""
     env_id = "LogsAndIronSword-v0"
@@ -97,17 +97,30 @@ def register_logs_sword_env():
     except:
         pass
     
-    # Register the environment
+    # Register the environment with the correct entry point
     try:
+        # Try different entry point formats used in various MineRL versions
         gym.register(
             id=env_id,
-            entry_point="minerl.env:MineRLEnv",
+            entry_point="minerl.env.malmo:MineRLEnv",  # Try this format first
             kwargs={
                 "env_spec": LogsAndIronSwordEnv()
             }
         )
         print(f"Successfully registered {env_id} environment")
     except Exception as e:
-        print(f"Error registering environment: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error with first entry point format: {e}")
+        try:
+            # Try alternative format
+            gym.register(
+                id=env_id,
+                entry_point="minerl.herobraine.env:MineRLEnv",
+                kwargs={
+                    "env_spec": LogsAndIronSwordEnv()
+                }
+            )
+            print(f"Successfully registered {env_id} with alternative entry point")
+        except Exception as e:
+            print(f"Error with alternative entry point: {e}")
+            import traceback
+            traceback.print_exc()
