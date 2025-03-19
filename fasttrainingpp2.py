@@ -270,6 +270,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     # Initialize
     obs = env.reset()
     visited_chunks = set()
+    prev_inventory = None
     episode_step_count = 0
     
     print(f"[Env {env_id}] Started")
@@ -296,10 +297,12 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
             
             # Calculate custom reward
             #custom_reward = env_reward
-            custom_reward, visited_chunks = reward_function(
-                next_obs, done, info, visited_chunks
+            custom_reward, visited_chunks, current_inventory = reward_function(
+                next_obs, done, info, visited_chunks, prev_inventory
             )
-            
+
+            prev_inventory = current_inventory
+
             # Apply death penalty if done
             if done:
                 custom_reward -= 2000.0
@@ -316,6 +319,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
                 obs = env.reset()
                 visited_chunks = set()
+                prev_inventory = None  # Reset previous inventory
                 episode_step_count = 0
                 result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
             else:
