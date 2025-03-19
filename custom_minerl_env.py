@@ -1,112 +1,111 @@
 import gym
 import numpy as np
 from minerl.herobraine.hero import handlers
-from minerl.herobraine.hero.mc import ALL_ITEMS
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
-from minerl.herobraine.hero.handler import Handler
-from minerl.herobraine.hero.handlers import RewardHandler
+from minerl.herobraine.hero.handlers.agent import reward as reward_handlers
 
-# Custom reward handler that tracks inventory changes
-class LogsAndSwordRewardHandler(RewardHandler):
-    """Custom reward handler for logs and iron sword objectives"""
-    
-    def __init__(self):
-        # Define the rewards for different items
-        self.log_reward = 10.0
-        self.iron_sword_reward = 1000.0
-        
-        # Create the reward dictionary
-        self.item_rewards = {
-            "log": self.log_reward,
-            "planks": 2.0,
-            "stick": 3.0,
-            "crafting_table": 5.0,
-            "wooden_pickaxe": 15.0,
-            "stone": 1.0,
-            "cobblestone": 2.0,
-            "stone_pickaxe": 25.0,
-            "iron_ore": 50.0,
-            "coal": 10.0,
-            "furnace": 15.0,
-            "iron_ingot": 75.0,
-            "iron_sword": self.iron_sword_reward
-        }
-        
-        # Create the reward function that compares current and previous inventory
-        # Note: We're using a simple lambda here that will be called by the parent class
-        def reward_func(obs, action, next_obs):
-            reward = 0.0
-            
-            # Skip if inventory is not in the observation
-            if "inventory" not in next_obs:
-                return 0.0
-                
-            # Get current inventory
-            inventory = next_obs["inventory"]
-            
-            # Calculate reward based on inventory contents (simplified)
-            # In a real implementation, you'd compare with previous inventory
-            for item, reward_value in self.item_rewards.items():
-                if item in inventory and inventory[item] > 0:
-                    reward += inventory[item] * reward_value / 10.0  # Scale down to avoid double rewards
-            
-            return reward
-            
-        # Initialize the parent RewardHandler with our reward function
-        super().__init__(reward_function=reward_func, reward_shape=())
-        
-    def to_string(self):
-        """Required method to describe the handler"""
-        return "LogsAndSwordRewardHandler"
-
-# Define our custom environment by extending HumanSurvival
 class LogsAndIronSwordEnv(HumanSurvival):
     def __init__(self):
-        # Initialize the parent class first
         super().__init__()
         
-        # Update the name
+        # Update the environment name
         self.name = "LogsAndIronSword-v0"
         
-        # Replace the default reward handlers with our custom one
+        # Remove default reward handlers
         self.reward_handlers = []
-        self.reward_handlers.append(LogsAndSwordRewardHandler())
         
-        # Define inventory keys we want to track
-        inventory_items = [
+        # Add reward for collecting logs (10 points each)
+        self.reward_handlers.append(
+            reward_handlers.RewardForCollectingItems({
+                "log": 10.0
+            })
+        )
+        
+        # Add reward for crafting an iron sword (1000 points)
+        self.reward_handlers.append(
+            reward_handlers.RewardForCollectingItems({
+                "iron_sword": 1000.0
+            })
+        )
+        
+        # Add rewards for intermediate steps
+        self.reward_handlers.append(
+            reward_handlers.RewardForCollectingItems({
+                # Wood processing
+                "planks": 2.0,
+                "stick": 3.0,
+                "crafting_table": 5.0,
+                "wooden_pickaxe": 15.0,
+                
+                # Stone processing
+                "stone": 1.0,
+                "cobblestone": 2.0,
+                "stone_pickaxe": 25.0,
+                
+                # Iron processing
+                "iron_ore": 50.0,
+                "coal": 10.0,
+                "furnace": 15.0,
+                "iron_ingot": 75.0
+            })
+        )
+        
+        # Add death penalty
+        self.reward_handlers.append(
+            handlers.RewardHandler(
+                reward_function=lambda obs, action, next_obs: -200.0 if obs.get("is_dead", False) else 0.0,
+                reward_shape=()
+            )
+        )
+        
+        # Add exploration reward
+        self.reward_handlers.append(
+            handlers.RewardHandler(
+                reward_function=lambda obs, action, next_obs: 1.0 if self._is_new_chunk(obs, next_obs) else 0.0,
+                reward_shape=()
+            )
+        )
+        
+        # Ensure all required items are in the inventory observation
+        required_items = [
             "log", "planks", "stick", "crafting_table", "wooden_pickaxe",
             "stone", "cobblestone", "stone_pickaxe", "iron_ore", "coal", 
             "furnace", "iron_ingot", "iron_sword"
         ]
         
-        # Ensure all required items are in the inventory handler
-        if hasattr(self, 'inventory_handler'):
-            # Update the inventory items to include the ones we care about
-            for item in inventory_items:
-                if item not in self.inventory_handler.items:
-                    self.inventory_handler.items.append(item)
+        # Make sure all required items are in the inventory handler
+        for item in required_items:
+            if item not in self.inventory_handler.items:
+                self.inventory_handler.items.append(item)
+    
+    def _is_new_chunk(self, obs, next_obs):
+        """Check if the agent moved to a new chunk"""
+        if "xpos" not in next_obs or "zpos" not in next_obs:
+            return False
+            
+        if "xpos" not in obs or "zpos" not in obs:
+            return False
+            
+        current_chunk = (int(next_obs["xpos"] // 16), int(next_obs["zpos"] // 16))
+        previous_chunk = (int(obs["xpos"] // 16), int(obs["zpos"] // 16))
+        
+        return current_chunk != previous_chunk
 
-def register_custom_env():
-    """Register the custom environment with Gym"""
+def register_logs_sword_env():
+    """Register the custom environment"""
     env_id = "LogsAndIronSword-v0"
     
-    # Unregister if it exists
-    try:
-        gym.envs.registration.registry.env_specs.pop(env_id)
-    except KeyError:
-        pass
-        
+    # Unregister if already exists
+    if env_id in gym.envs.registry.env_specs:
+        del gym.envs.registry.env_specs[env_id]
+    
     # Register the environment
-    try:
-        gym.register(
-            id=env_id,
-            entry_point="minerl.env:MineRLEnv",
-            kwargs={
-                "env_spec": LogsAndIronSwordEnv()
-            }
-        )
-        print(f"Successfully registered {env_id} environment")
-    except Exception as e:
-        print(f"Error registering environment: {e}")
-        import traceback
-        traceback.print_exc()
+    gym.register(
+        id=env_id,
+        entry_point="minerl.env:MineRLEnv",
+        kwargs={
+            "env_spec": LogsAndIronSwordEnv()
+        }
+    )
+    print(f"Successfully registered {env_id} environment")
+    
