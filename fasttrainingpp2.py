@@ -298,18 +298,48 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 next_obs, env_reward, done, info = env.step(action)
 
                 inventory = next_obs.get("inventory", {})
-                inventory = next_obs.get("inventory", {})
                 if inventory.get("iron_sword", 0) > 0:
                     print(f"[Env {env_id}] IRON SWORD CRAFTED! Success condition met!")
-                    custom_reward = 5000.0  # Big reward
-                    done = True  # Mark episode as complete
-
-                     # Save success info
-                    info['success'] = True
-                    info['completed_task'] = 'craft_iron_sword'
+                    print(f"[Env {env_id}] Beginning controlled shutdown and restart sequence")
                     
-                    # Reset consecutive errors
-                    consecutive_errors = 0
+                    # 1. Send success notification with large reward
+                    success_reward = 5000.0
+                    result_queue.put((env_id, action, next_obs, True, success_reward, 
+                                     {'success': True, 'completed_task': 'craft_iron_sword'}))
+                    
+                    # 2. Send explicit episode completion signal
+                    result_queue.put((env_id, None, None, True, episode_step_count, 
+                                     {'terminal_state': 'success'}))
+                    
+                    # 3. Properly close and recreate the environment rather than just resetting
+                    try:
+                        env.close()
+                        print(f"[Env {env_id}] Environment closed after success")
+                        time.sleep(1.0)  # Give time for cleanup
+                        
+                        # 4. Create a fresh environment instance
+                        env = HumanSurvival(**ENV_KWARGS).make()
+                        print(f"[Env {env_id}] New environment created after success")
+                        
+                        # 5. Reset state tracking variables
+                        obs = env.reset()
+                        visited_chunks = set()
+                        prev_inventory = None
+                        episode_step_count = 0
+                        
+                        # 6. Send initial observation from fresh environment
+                        result_queue.put((env_id, None, obs, False, 0, None))
+                        print(f"[Env {env_id}] New episode started after success")
+                        
+                        # 7. Continue with fresh environment
+                        continue
+                        
+                    except Exception as reset_error:
+                        print(f"[Env {env_id}] Failed to recreate environment: {reset_error}")
+                        # Signal termination to main thread
+                        result_queue.put((env_id, None, None, True, 0, 
+                                         {'error': 'Failed to reset after success'}))
+                        break  # Exit worker loop to allow process to be restarted
                     
                 # Check for error in info dictionary
                 elif 'error' in info:
