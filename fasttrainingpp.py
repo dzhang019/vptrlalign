@@ -85,7 +85,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
     
     # Initialize
     obs = env.reset()
-    visited_chunks = set()
+    visited_chunks = {}
     episode_step_count = 0
     
     print(f"[Env {env_id}] Started")
@@ -130,7 +130,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             if done:
                 result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
                 obs = env.reset()
-                visited_chunks = set()
+                visited_chunks = {}
                 episode_step_count = 0
                 result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
             else:
@@ -869,7 +869,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         phase_coordinator: Coordinator for synchronizing phases between threads
     """
     # Hyperparameters
-    LEARNING_RATE = 5e-6
+    LEARNING_RATE = 1e-6
     MAX_GRAD_NORM = 1.0
     LAMBDA_KL = 20.0
     GAMMA = 0.9999
