@@ -272,6 +272,10 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     visited_chunks = set()
     prev_inventory = None
     episode_step_count = 0
+
+    # Initialize error tracking
+    consecutive_errors = 0
+    last_error_time = time.time()
     
     print(f"[Env {env_id}] Started")
     
@@ -294,17 +298,28 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 next_obs, env_reward, done, info = env.step(action)
 
                 inventory = next_obs.get("inventory", {})
+                inventory = next_obs.get("inventory", {})
                 if inventory.get("iron_sword", 0) > 0:
-                    print(f"[Env {env_id}] IRON SWORD CRAFTED! Bonus: +5000.0")
-                    # Mark as done properly instead of letting it timeout
-                    done = True
-                    custom_reward = 5000.0  # Award the bonus directly
+                    print(f"[Env {env_id}] IRON SWORD CRAFTED! Success condition met!")
+                    custom_reward = 5000.0  # Big reward
+                    done = True  # Mark episode as complete
+
+                     # Save success info
+                    info['success'] = True
+                    info['completed_task'] = 'craft_iron_sword'
+                    
+                    # Reset consecutive errors
+                    consecutive_errors = 0
                     
                 # Check for error in info dictionary
-                if 'error' in info:
+                elif 'error' in info:
                     print(f"[Env {env_id}] Error detected: {info['error']}")
                     # Consider this step done, but don't apply additional death penalty
                     done = True
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 0
+
             except Exception as e:
                 print(f"[Env {env_id}] Exception during step: {e}")
                 done = True
@@ -312,18 +327,27 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 env_reward = 0
                 info = {'error': str(e)}
                 
-                # Add error recovery - attempt to reset if we hit errors multiple times
-                error_count += 1
-                if error_count > 3:
-                    print(f"[Env {env_id}] Multiple errors, attempting environment reset")
+                # Track errors
+                consecutive_errors += 1
+                current_time = time.time()
+                
+                # If we're getting many errors in a short time, try to recover
+                if consecutive_errors > 3 and (current_time - last_error_time) < 10.0:
+                    print(f"[Env {env_id}] Multiple errors detected, attempting environment reset")
                     try:
                         env.close()
-                        time.sleep(1.0)
+                        time.sleep(1.0)  # Wait before recreating
                         env = HumanSurvival(**ENV_KWARGS).make()
                         obs = env.reset()
-                        error_count = 0
+                        visited_chunks = set()
+                        prev_inventory = None
+                        episode_step_count = 0
+                        consecutive_errors = 0
+                        print(f"[Env {env_id}] Environment successfully reset after errors")
                     except Exception as reset_error:
-                        print(f"[Env {env_id}] Failed to reset environment: {reset_error}")
+                        print(f"[Env {env_id}] Failed to reset: {reset_error}")
+                
+                last_error_time = current_time
             step_time = time.time() - step_start
             #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
@@ -349,12 +373,13 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 #env.render()
             # Reset if episode is done
             if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
+                result_queue.put((env_id, None, None, True, episode_step_count, None))
                 time.sleep(0.5)
                 obs = env.reset()
                 visited_chunks = set()
                 prev_inventory = None  # Reset previous inventory
                 episode_step_count = 0
+                consecutive_errors = 0  # Reset error count on new episodes
                 result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
 
             else:
@@ -377,6 +402,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     # Initialize tracking variables
     obs_list = [None] * num_envs
     done_list = [False] * num_envs
+    env_is_done = done_list
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
