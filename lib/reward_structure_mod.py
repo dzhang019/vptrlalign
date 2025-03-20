@@ -60,7 +60,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
     chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
     if chunk_key not in visited_chunks:
         reward += 60  # Reward for exploring new chunks
-        visited_chunks.add(current_chunk)
+        visited_chunks[chunk_key] = True
 
     # Exploration reward: New depths
     # ypos_rounded = int(ypos)  # Round y-position to integer for tracking
