@@ -290,7 +290,20 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 
             # Step environment
             step_start = time.time()
-            next_obs, env_reward, done, info = env.step(action)
+            try:
+                next_obs, env_reward, done, info = env.step(action)
+                
+                # Check for error in info dictionary
+                if 'error' in info:
+                    print(f"[Env {env_id}] Error detected: {info['error']}")
+                    # Consider this step done, but don't apply additional death penalty
+                    done = True
+            except Exception as e:
+                print(f"[Env {env_id}] Exception during step: {e}")
+                done = True
+                next_obs = obs  # Use previous observation
+                env_reward = 0
+                info = {'error': str(e)}
             step_time = time.time() - step_start
             #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
