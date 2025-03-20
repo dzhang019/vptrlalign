@@ -1411,5 +1411,5 @@ if __name__ == "__main__":
         rollout_steps=args.rollout_steps,
         num_envs=args.num_envs,
         queue_size=args.queue_size,
-        phase=1
+        phase=args.phase
     )
