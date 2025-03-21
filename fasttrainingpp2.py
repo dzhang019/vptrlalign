@@ -626,7 +626,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     obs_list[env_id] = next_obs
                     
                     # Reset hidden state if done
-                     if done:
+                    if done:
                         hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
                         env_status[env_id] = "RESETTING" 
                     
