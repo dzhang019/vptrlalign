@@ -264,7 +264,6 @@ class PhaseCoordinator:
 
 def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     # Create environment
-    #env = gym.make("LogsAndIronSword-v0")
     env = HumanSurvival(**ENV_KWARGS).make()
     
     # Initialize
@@ -272,10 +271,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     visited_chunks = set()
     prev_inventory = None
     episode_step_count = 0
-
-    # Initialize error tracking
     consecutive_errors = 0
-    last_error_time = time.time()
     
     print(f"[Env {env_id}] Started")
     
@@ -284,19 +280,44 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     
     action_timeout = 0.01
     step_count = 0
+    
     while not stop_flag.value:
         try:
             # Get action from queue
             action = action_queue.get(timeout=action_timeout)
             
             if action is None:  # Signal to terminate
-                break
+                print(f"[Env {env_id}] Received termination signal, restarting environment")
+                try:
+                    env.close()
+                except Exception as e:
+                    print(f"[Env {env_id}] Error closing environment: {e}")
+                
+                # Create a new environment instance
+                try:
+                    time.sleep(1.0)  # Brief delay before restart
+                    env = HumanSurvival(**ENV_KWARGS).make()
+                    obs = env.reset()
+                    visited_chunks = set()
+                    prev_inventory = None
+                    episode_step_count = 0
+                    consecutive_errors = 0
+                    print(f"[Env {env_id}] Environment successfully restarted")
+                    
+                    # Send initial observation from new environment
+                    result_queue.put((env_id, None, obs, False, 0, None))
+                except Exception as restart_error:
+                    print(f"[Env {env_id}] Failed to restart environment: {restart_error}")
+                    time.sleep(5.0)  # Longer delay on restart failure
+                    continue
+                continue
                 
             # Step environment
             step_start = time.time()
             try:
                 next_obs, env_reward, done, info = env.step(action)
-
+                
+                # Check for iron sword crafting (success condition)
                 inventory = next_obs.get("inventory", {})
                 if inventory.get("iron_sword", 0) > 0:
                     print(f"[Env {env_id}] IRON SWORD CRAFTED! Success condition met!")
@@ -311,62 +332,68 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                     result_queue.put((env_id, None, None, True, episode_step_count, 
                                      {'terminal_state': 'success'}))
                     
-                    # 3. Properly close and recreate the environment rather than just resetting
+                    # 3. Properly close and recreate the environment
                     try:
                         env.close()
                         print(f"[Env {env_id}] Environment closed after success")
-                        time.sleep(1.0)  # Give time for cleanup
-                        
-                        # 4. Create a fresh environment instance
+                    except Exception as e:
+                        print(f"[Env {env_id}] Error closing environment: {e}")
+                    
+                    # 4. Wait before creating new environment
+                    time.sleep(1.0)
+                    
+                    # 5. Create a fresh environment instance
+                    try:
                         env = HumanSurvival(**ENV_KWARGS).make()
                         print(f"[Env {env_id}] New environment created after success")
                         
-                        # 5. Reset state tracking variables
+                        # 6. Reset state tracking variables
                         obs = env.reset()
                         visited_chunks = set()
                         prev_inventory = None
                         episode_step_count = 0
+                        consecutive_errors = 0
                         
-                        # 6. Send initial observation from fresh environment
+                        # 7. Send initial observation from fresh environment
                         result_queue.put((env_id, None, obs, False, 0, None))
                         print(f"[Env {env_id}] New episode started after success")
                         
-                        # 7. Continue with fresh environment
-                        continue
-                        
-                    except Exception as reset_error:
-                        print(f"[Env {env_id}] Failed to recreate environment: {reset_error}")
-                        # Signal termination to main thread
-                        result_queue.put((env_id, None, None, True, 0, 
-                                         {'error': 'Failed to reset after success'}))
-                        break  # Exit worker loop to allow process to be restarted
+                    except Exception as restart_error:
+                        print(f"[Env {env_id}] Failed to restart environment: {restart_error}")
+                        time.sleep(5.0)  # Longer delay on restart failure
                     
+                    # 8. Continue with fresh environment
+                    continue
+                
                 # Check for error in info dictionary
-                elif 'error' in info:
+                if 'error' in info:
                     print(f"[Env {env_id}] Error detected: {info['error']}")
                     # Consider this step done, but don't apply additional death penalty
                     done = True
                     consecutive_errors += 1
                 else:
+                    # Reset error count on successful steps
                     consecutive_errors = 0
-
+                    
             except Exception as e:
                 print(f"[Env {env_id}] Exception during step: {e}")
                 done = True
                 next_obs = obs  # Use previous observation
                 env_reward = 0
                 info = {'error': str(e)}
-                
-                # Track errors
                 consecutive_errors += 1
-                current_time = time.time()
                 
-                # If we're getting many errors in a short time, try to recover
-                if consecutive_errors > 3 and (current_time - last_error_time) < 10.0:
-                    print(f"[Env {env_id}] Multiple errors detected, attempting environment reset")
+                # If we have multiple consecutive errors, try to restart the environment
+                if consecutive_errors > 3:
+                    print(f"[Env {env_id}] Multiple consecutive errors ({consecutive_errors}), attempting environment reset")
                     try:
                         env.close()
-                        time.sleep(1.0)  # Wait before recreating
+                    except:
+                        pass
+                        
+                    time.sleep(1.0)  # Wait before recreating
+                    
+                    try:
                         env = HumanSurvival(**ENV_KWARGS).make()
                         obs = env.reset()
                         visited_chunks = set()
@@ -374,16 +401,18 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                         episode_step_count = 0
                         consecutive_errors = 0
                         print(f"[Env {env_id}] Environment successfully reset after errors")
+                        
+                        # Send initial observation from new environment
+                        result_queue.put((env_id, None, obs, False, 0, None))
+                        continue
                     except Exception as reset_error:
-                        print(f"[Env {env_id}] Failed to reset: {reset_error}")
-                
-                last_error_time = current_time
+                        print(f"[Env {env_id}] Failed to reset environment after errors: {reset_error}")
+                        # Continue with normal error handling
+            
             step_time = time.time() - step_start
-            #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
             
             # Calculate custom reward
-            #custom_reward = env_reward
             custom_reward, visited_chunks, current_inventory = reward_function(
                 next_obs, done, info, visited_chunks, prev_inventory
             )
@@ -391,27 +420,29 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
             prev_inventory = current_inventory
 
             # Apply death penalty if done
-            if done:
-                custom_reward -= 2000.0
+            if done and 'success' not in info:
+                custom_reward -= 200.0
                 
             # Increment step count
             episode_step_count += 1
             
             # Send results back
             result_queue.put((env_id, action, next_obs, done, custom_reward, info))
-            #if env_id == 0:
-                #env.render()
+            
             # Reset if episode is done
             if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))
+                result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
+                
+                # Add delay before reset to improve stability
                 time.sleep(0.5)
+                
+                # Reset environment
                 obs = env.reset()
                 visited_chunks = set()
                 prev_inventory = None  # Reset previous inventory
                 episode_step_count = 0
                 consecutive_errors = 0  # Reset error count on new episodes
                 result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
-
             else:
                 obs = next_obs
                 
@@ -419,12 +450,37 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
             continue
         except Exception as e:
             print(f"[Env {env_id}] Error: {e}")
+            consecutive_errors += 1
+            
+            # If too many errors occur outside the main loop, try to restart
+            if consecutive_errors > 5:
+                print(f"[Env {env_id}] Too many consecutive errors, attempting restart")
+                try:
+                    env.close()
+                except:
+                    pass
+                    
+                time.sleep(2.0)  # Longer wait for more severe error
+                
+                try:
+                    env = HumanSurvival(**ENV_KWARGS).make()
+                    obs = env.reset()
+                    visited_chunks = set()
+                    prev_inventory = None
+                    episode_step_count = 0
+                    consecutive_errors = 0
+                    print(f"[Env {env_id}] Environment successfully restarted after critical errors")
+                    
+                    # Send initial observation from new environment
+                    result_queue.put((env_id, None, obs, False, 0, None))
+                except Exception as restart_error:
+                    print(f"[Env {env_id}] Failed to restart after critical errors: {restart_error}")
+                    time.sleep(10.0)  # Longer cooldown period
             
     # Clean up
     print(f"[Env {env_id}] Processed {step_count} steps")
     env.close()
     print(f"[Env {env_id}] Stopped")
-
 
 # Thread for coordinating environments and collecting rollouts
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
@@ -435,12 +491,20 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     env_is_done = done_list
     episode_step_counts = [0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
-    
+
+    # Track last response time for each environment
+    env_last_response = [time.time()] * num_envs
+    # Track environment status for debugging
+    env_status = ["INITIALIZING"] * num_envs
+    # Track overall iteration timing
+    last_heartbeat = time.time()
+                           
     # Wait for initial observations from all environments
     for _ in range(num_envs):
         env_id, _, obs, _, _, _ = result_queue.get()
         obs_list[env_id] = obs
-        env_is_done[env_id] = False  # Initialize as not done
+        env_last_response[env_id] = time.time()
+        env_status[env_id] = "ACTIVE"
         print(f"[Environment Thread] Got initial observation from env {env_id}")
     
     iteration = 0
@@ -454,7 +518,18 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         
         iteration += 1
         start_time = time.time()
-        
+
+        # Print periodic heartbeat and status report
+        current_time = time.time()
+        if current_time - last_heartbeat > 60:  # Every minute
+            active_envs = sum(1 for s in env_status if s == "ACTIVE")
+            print(f"[Environment Thread] HEARTBEAT - Active environments: {active_envs}/{num_envs}")
+            for env_id in range(num_envs):
+                time_since_response = current_time - env_last_response[env_id]
+                print(f"[Environment Thread] Env {env_id}: {env_status[env_id]}, "
+                      f"Last response: {time_since_response:.1f}s ago")
+            last_heartbeat = current_time
+            
         # Initialize rollouts for each environment
         rollouts = [
             {
@@ -474,7 +549,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         
         # Start all environments processing at once
         for env_id in range(num_envs):
-            if obs_list[env_id] is not None and not env_is_done[env_id]:
+            if obs_list[env_id] is not None and not env_is_done[env_id] and env_status[env_id] == "ACTIVE":
                 # Generate action using agent
                 with th.no_grad():
                     action_info = agent.get_action_and_training_info(
@@ -492,14 +567,26 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                 
                 # Send action to environment
-                action_queues[env_id].put(minerl_action)
-                env_waiting_for_result[env_id] = True
+                try:
+                    action_queues[env_id].put(minerl_action)
+                    env_waiting_for_result[env_id] = True
+                except Exception as e:
+                    print(f"[Environment Thread] Error sending action to env {env_id}: {e}")
+                    env_status[env_id] = "ERROR"
         
         # Process environment results until all steps are complete
         total_transitions = 0
         result_timeout = 0.01
+        collection_start_time = time.time()
+        max_collection_time = 300  # 5 minutes timeout for collection phase   
         
         while total_transitions < rollout_steps * num_envs:
+            # Check for collection timeout
+            current_time = time.time()
+            if current_time - collection_start_time > max_collection_time:
+                print(f"[Environment Thread] WARNING: Collection timed out after {max_collection_time}s")
+                print(f"[Environment Thread] Only collected {total_transitions}/{rollout_steps * num_envs} transitions")
+                break
             # Check if auxiliary phase started during collection
             if phase_coordinator.in_auxiliary_phase():
                 print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
@@ -520,6 +607,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 # Check if this is an observation update without stepping
                 if action is None and not done:
                     obs_list[env_id] = next_obs
+                    env_status[env_id] = "ACTIVE"
                     continue  # Don't count this as a transition
                 
                 # Normal step result - store in rollout if we were waiting for this environment
@@ -538,9 +626,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     obs_list[env_id] = next_obs
                     
                     # Reset hidden state if done
-                    if done:
-                        env_is_done[env_id] = True
+                     if done:
                         hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
+                        env_status[env_id] = "RESETTING" 
                     
                     # Mark environment as processed
                     env_waiting_for_result[env_id] = False
@@ -566,11 +654,65 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                         hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                         
                         # Send action to environment
-                        action_queues[env_id].put(minerl_action)
-                        env_waiting_for_result[env_id] = True
+                        try:
+                            action_queues[env_id].put(minerl_action)
+                            env_waiting_for_result[env_id] = True
+                        except Exception as e:
+                            print(f"[Environment Thread] Error sending action to env {env_id}: {e}")
+                            env_status[env_id] = "ERROR"
             except queue.Empty:
+                # Check for stalled environments while waiting for results
+                current_time = time.time()
+                for env_id in range(num_envs):
+                    if env_waiting_for_result[env_id]:
+                        time_since_response = current_time - env_last_response[env_id]
+                        if time_since_response > 120:  # 2 minutes without response
+                            print(f"[Environment Thread] WARNING: Env {env_id} hasn't responded for {time_since_response:.1f}s")
+                            env_status[env_id] = "STALLED"
+                            
+                        if time_since_response > 300:  # 5 minutes without response
+                            print(f"[Environment Thread] CRITICAL: Env {env_id} stalled for {time_since_response:.1f}s, forcing restart")
+                            # Force restart this environment
+                            try:
+                                # Clear the action queue
+                                while not action_queues[env_id].empty():
+                                    action_queues[env_id].get_nowait()
+                                    
+                                # Send termination signal
+                                action_queues[env_id].put(None)
+                                print(f"[Environment Thread] Sent termination signal to env {env_id}")
+                                
+                                # Mark as not waiting
+                                env_waiting_for_result[env_id] = False
+                                env_status[env_id] = "RESTARTING"
+                                # Don't update last_response_time yet - wait for actual response
+                            except Exception as e:
+                                print(f"[Environment Thread] Error restarting env {env_id}: {e}")
+                                env_status[env_id] = "ERROR"
                 continue
-        
+
+        # Check for stalled environments before finalizing rollouts
+        current_time = time.time()
+        for env_id in range(num_envs):
+            time_since_response = current_time - env_last_response[env_id]
+            if time_since_response > 300 and env_status[env_id] != "RESTARTING":  # 5 minutes without response
+                print(f"[Environment Thread] Environment {env_id} hasn't responded for {time_since_response:.1f}s, forcing restart")
+                # Force restart this environment
+                try:
+                    # Clear the action queue
+                    while not action_queues[env_id].empty():
+                        action_queues[env_id].get_nowait()
+                        
+                    # Send termination signal
+                    action_queues[env_id].put(None)
+                    print(f"[Environment Thread] Sent termination signal to env {env_id}")
+                    
+                    # Reset tracking for this environment
+                    env_status[env_id] = "RESTARTING"
+                except Exception as e:
+                    print(f"[Environment Thread] Error restarting env {env_id}: {e}")
+                    env_status[env_id] = "ERROR"
+                    
         # Check if we're in auxiliary phase again before putting rollouts in queue
         if not phase_coordinator.in_auxiliary_phase():
             # Send collected rollouts to training thread
@@ -1203,6 +1345,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     # PPG tracking variables
     pi_update_counter = 0
     stored_rollouts = []
+
+    max_wait_time = 600
     
     # Check if agent has auxiliary value head
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
@@ -1265,9 +1409,14 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                  f"Waiting for rollouts...")
             
             wait_start = time.time()
-            rollouts = rollout_queue.get()
-            wait_duration = time.time() - wait_start
-            print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+              try:
+                rollouts = rollout_queue.get(timeout=max_wait_time)
+                wait_duration = time.time() - wait_start
+                print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
+            except queue.Empty:
+                print(f"[Training Thread] WARNING: Timed out after waiting {max_wait_time}s for rollouts.")
+                print(f"[Training Thread] Training may be stalled. Continuing to next iteration.")
+                continue
             
             # Store rollouts for PPG auxiliary phase if enabled
             if PPG_ENABLED and has_aux_head:
