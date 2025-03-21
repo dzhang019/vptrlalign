@@ -32,10 +32,12 @@ def custom_reward_function(obs, done, info, visited_chunks):
         
         # Calculate health change
         health_change = current_health - prev_health
+        #print("health_change:{health_change}")
         if health_change < 0:
             # Penalty for damage taken
             reward -= 0.05 * abs(health_change)
-            print("took {health_change} damage")
+            print(f"took {health_change} damage")
+    visited_chunks[HEALTH_KEY] = current_health
     if current_health <= 4:  # 2 hearts or less
         # Exponential penalty as health approaches zero
         reward -= 0.2 * (5 - current_health)**2
@@ -59,8 +61,9 @@ def custom_reward_function(obs, done, info, visited_chunks):
     current_chunk = (int(xpos) // 16, int(zpos) // 16)
     chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
     if chunk_key not in visited_chunks:
-        reward += 60  # Reward for exploring new chunks
+        reward += 2  # Reward for exploring new chunks
         visited_chunks[chunk_key] = True
+        print("visited new chunk!")
 
     # Exploration reward: New depths
     # ypos_rounded = int(ypos)  # Round y-position to integer for tracking
