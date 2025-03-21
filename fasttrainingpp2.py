@@ -1409,7 +1409,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                  f"Waiting for rollouts...")
             
             wait_start = time.time()
-              try:
+            try:
                 rollouts = rollout_queue.get(timeout=max_wait_time)
                 wait_duration = time.time() - wait_start
                 print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
