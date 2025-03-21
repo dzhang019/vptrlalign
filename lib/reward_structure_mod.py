@@ -76,7 +76,8 @@ def custom_reward_function(obs, done, info, visited_chunks):
     if biome_id is not None:
         biome_key = f"biome_{biome_id}"
         if biome_key not in visited_chunks:
-            reward += 500  # Reward for discovering new biomes
+            reward += 100  # Reward for discovering new biomes
             visited_chunks[biome_key] = True
+            print("visited new biome!")
 
     return reward, visited_chunks
