@@ -1759,6 +1759,7 @@ def train_rl_mp(
             print(f"Saving weights to {out_weights}")
             th.save(agent.policy.state_dict(), out_weights)
             print("Weights saved successfully")
+            exit()
             
     except Exception as e:
         print(f"CRITICAL ERROR in train_rl_mp: {e}")
