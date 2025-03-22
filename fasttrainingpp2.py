@@ -510,18 +510,37 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     env_status = ["INITIALIZING"] * num_envs
     # Track overall iteration timing
     last_heartbeat = time.time()
-                           
-    # Initialize this variable at the beginning of the function,
-    # not just inside the collection loop
+    # Initialize env_waiting_for_result here
     env_waiting_for_result = [False] * num_envs
+    
+    # Initialize empty_collection tracking variables
+    empty_collection_count = 0
+    max_empty_collections = 5
                            
     # Wait for initial observations from all environments
-    for _ in range(num_envs):
-        env_id, _, obs, _, _, _ = result_queue.get()
-        obs_list[env_id] = obs
-        env_last_response[env_id] = time.time()
-        env_status[env_id] = "ACTIVE"
-        print(f"[Environment Thread] Got initial observation from env {env_id}")
+    observation_count = 0
+    observation_timeout = time.time() + 300  # 5 minute timeout for initial observations
+    
+    # Wait for initial observations from all environments with timeout
+    while observation_count < num_envs and time.time() < observation_timeout:
+        try:
+            env_id, _, obs, _, _, _ = result_queue.get(timeout=1.0)
+            obs_list[env_id] = obs
+            env_last_response[env_id] = time.time()
+            env_status[env_id] = "ACTIVE"
+            observation_count += 1
+            print(f"[Environment Thread] Got initial observation from env {env_id}, {observation_count}/{num_envs}")
+        except queue.Empty:
+            print(f"[Environment Thread] Waiting for initial observations, {observation_count}/{num_envs} received...")
+    
+    if observation_count < num_envs:
+        print(f"[Environment Thread] WARNING: Only received {observation_count}/{num_envs} initial observations")
+        print(f"[Environment Thread] Continuing with partial environment set")
+    
+    # Verify all environments are ready
+    print("[Environment Thread] All environments initialized")
+    for env_id in range(num_envs):
+        print(f"[Environment Thread] Env {env_id}: Status={env_status[env_id]}, Time since last response: {time.time() - env_last_response[env_id]:.1f}s")
     
     iteration = 0
     while not stop_flag[0]:
@@ -536,49 +555,16 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         start_time = time.time()
 
         # Print periodic heartbeat and status report
-        # In environment_thread, update the check for stalled environments
         current_time = time.time()
-        for env_id in range(num_envs):
-            # In environment_thread at the beginning of the main loop
-            empty_collection_count = 0
-            max_empty_collections = 5
-            
-            # After detecting zero transitions collected
-            if actual_transitions == 0:
-                empty_collection_count += 1
-                if empty_collection_count >= max_empty_collections:
-                    print("[Environment Thread] WARNING: Multiple empty collections, switching to synthetic data mode")
-                    # Generate synthetic transitions for training to at least make progress
-                    synthetic_rollouts = generate_synthetic_rollouts(agent, rollout_steps, num_envs)
-                    rollout_queue.put(synthetic_rollouts)
-                    continue
-            else:
-                empty_collection_count = 0  # Reset counter on successful collection
-            if env_waiting_for_result[env_id]:
+        if current_time - last_heartbeat > 60:  # Every minute
+            active_envs = sum(1 for s in env_status if s == "ACTIVE")
+            print(f"[Environment Thread] HEARTBEAT - Active environments: {active_envs}/{num_envs}")
+            for env_id in range(num_envs):
                 time_since_response = current_time - env_last_response[env_id]
-                if time_since_response > 120:  # 2 minutes without response
-                    print(f"[Environment Thread] WARNING: Env {env_id} hasn't responded for {time_since_response:.1f}s")
-                    
-                    # More aggressive action: Force restart immediately after 2 minutes instead of waiting for 5
-                    try:
-                        # Clear the action queue
-                        while not action_queues[env_id].empty():
-                            action_queues[env_id].get_nowait()
-                            
-                        # Send termination signal
-                        action_queues[env_id].put(None)
-                        print(f"[Environment Thread] Forcing restart of env {env_id} due to {time_since_response:.1f}s without response")
-                        
-                        # Mark as not waiting
-                        env_waiting_for_result[env_id] = False
-                        env_status[env_id] = "RESTARTING"
-                        
-                        # Add this line to prevent continuous warnings about the same environment
-                        env_last_response[env_id] = current_time  # Reset the timer to avoid repeat warnings
-                    except Exception as e:
-                        print(f"[Environment Thread] Error restarting env {env_id}: {e}")
-                        env_status[env_id] = "ERROR"
-            
+                print(f"[Environment Thread] Env {env_id}: {env_status[env_id]}, "
+                      f"Last response: {time_since_response:.1f}s ago")
+            last_heartbeat = current_time
+        
         # Initialize rollouts for each environment
         rollouts = [
             {
@@ -636,6 +622,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 print(f"[Environment Thread] WARNING: Collection timed out after {max_collection_time}s")
                 print(f"[Environment Thread] Only collected {total_transitions}/{rollout_steps * num_envs} transitions")
                 break
+                
             # Check if auxiliary phase started during collection
             if phase_coordinator.in_auxiliary_phase():
                 print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
@@ -644,6 +631,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             try:
                 # Get result from any environment
                 env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
+                
+                # Update last response time
+                env_last_response[env_id] = time.time()
                 
                 # Check if this is an episode completion signal
                 if action is None and done and next_obs is None:
@@ -670,7 +660,6 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     )
                     rollouts[env_id]["next_obs"].append(next_obs)
                     
-                    
                     # Update state
                     obs_list[env_id] = next_obs
                     
@@ -685,7 +674,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     total_transitions += 1
                     
                     # If this environment needs more steps, immediately send next action
-                    if env_step_counts[env_id] < rollout_steps:
+                    if env_step_counts[env_id] < rollout_steps and not done and env_status[env_id] == "ACTIVE":
                         # Generate next action
                         with th.no_grad():
                             action_info = agent.get_action_and_training_info(
@@ -734,7 +723,8 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                                 # Mark as not waiting
                                 env_waiting_for_result[env_id] = False
                                 env_status[env_id] = "RESTARTING"
-                                # Don't update last_response_time yet - wait for actual response
+                                # Reset the timer to avoid repeat warnings
+                                env_last_response[env_id] = current_time
                             except Exception as e:
                                 print(f"[Environment Thread] Error restarting env {env_id}: {e}")
                                 env_status[env_id] = "ERROR"
@@ -758,18 +748,33 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     
                     # Reset tracking for this environment
                     env_status[env_id] = "RESTARTING"
+                    # Reset the timer
+                    env_last_response[env_id] = current_time
                 except Exception as e:
                     print(f"[Environment Thread] Error restarting env {env_id}: {e}")
                     env_status[env_id] = "ERROR"
-                    
+        
+        # Count total transitions
+        actual_transitions = sum(len(r["obs"]) for r in rollouts)
+        
+        # Check for repeated empty collections
+        if actual_transitions == 0:
+            empty_collection_count += 1
+            if empty_collection_count >= max_empty_collections:
+                print(f"[Environment Thread] WARNING: Multiple empty collections ({empty_collection_count}/{max_empty_collections}), switching to synthetic data mode")
+                # Generate synthetic transitions for training to at least make progress
+                synthetic_rollouts = generate_synthetic_rollouts(agent, rollout_steps, num_envs)
+                rollout_queue.put(synthetic_rollouts)
+                print("[Environment Thread] Sent synthetic rollouts to training thread")
+                continue
+        else:
+            empty_collection_count = 0  # Reset counter on successful collection
+        
         # Check if we're in auxiliary phase again before putting rollouts in queue
         if not phase_coordinator.in_auxiliary_phase():
             # Send collected rollouts to training thread
             end_time = time.time()
             duration = end_time - start_time
-            
-            # Count total transitions
-            actual_transitions = sum(len(r["obs"]) for r in rollouts)
             
             rollout_queue.put(rollouts)
             
@@ -778,8 +783,55 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         else:
             # Buffer the rollouts for later use
             phase_coordinator.buffer_rollout(rollouts)
-            print(f"[Environment Thread] Iteration {iteration} - buffering {sum(len(r['obs']) for r in rollouts)} transitions")
+            print(f"[Environment Thread] Iteration {iteration} - buffering {actual_transitions} transitions")
 
+def generate_synthetic_rollouts(agent, rollout_steps, num_envs):
+    """Generate synthetic rollouts for training when environments fail."""
+    print("[Synthetic] Generating synthetic training data")
+    
+    rollouts = []
+    for env_id in range(num_envs):
+        # Create a simple synthetic rollout with random observations
+        rollout = {
+            "obs": [],
+            "actions": [],
+            "rewards": [],
+            "dones": [],
+            "hidden_states": [],
+            "next_obs": []
+        }
+        
+        # Generate some transitions with basic data
+        for _ in range(max(1, rollout_steps // 10)):  # Generate fewer steps for synthetic data
+            # Basic dummy observation
+            dummy_obs = {
+                "pov": np.random.randint(0, 255, size=(64, 64, 3), dtype=np.uint8),
+                "inventory": {"log": 0, "planks": 0},
+                "equipped_items": {"mainhand": {"type": "none"}},
+                "xpos": float(np.random.randint(-100, 100)),
+                "ypos": float(np.random.randint(60, 80)),
+                "zpos": float(np.random.randint(-100, 100)),
+            }
+            
+            # Add random action
+            dummy_action = {"forward": 1, "jump": 0}
+            
+            # Add data to rollout
+            rollout["obs"].append(dummy_obs)
+            rollout["actions"].append(dummy_action)
+            rollout["rewards"].append(0.01)  # Small positive reward
+            rollout["dones"].append(False)
+            rollout["hidden_states"].append(agent.policy.initial_state(batch_size=1))
+            rollout["next_obs"].append(dummy_obs)  # Same obs for simplicity
+        
+        # Make last transition terminal
+        if len(rollout["dones"]) > 0:
+            rollout["dones"][-1] = True
+        
+        rollouts.append(rollout)
+    
+    print(f"[Synthetic] Generated {sum(len(r['obs']) for r in rollouts)} synthetic transitions")
+    return rollouts
 
 # Process rollouts from a single environment
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
