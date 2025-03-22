@@ -215,6 +215,7 @@ def load_model_parameters(path_to_model_file):
 
 
 # Simple thread-safe queue for passing rollouts between threads
+# Simple thread-safe queue for passing rollouts between threads
 class RolloutQueue:
     def __init__(self, maxsize=10):
         self.queue = queue.Queue(maxsize=maxsize)
@@ -222,8 +223,14 @@ class RolloutQueue:
     def put(self, rollouts):
         self.queue.put(rollouts, block=True)
     
-    def get(self):
-        return self.queue.get(block=True)
+    def get(self, timeout=None):
+        if timeout is None:
+            return self.queue.get(block=True)
+        else:
+            try:
+                return self.queue.get(block=True, timeout=timeout)
+            except queue.Empty:
+                raise queue.Empty("Queue get operation timed out")
     
     def qsize(self):
         return self.queue.qsize()
