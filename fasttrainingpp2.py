@@ -1470,7 +1470,10 @@ def train_rl_mp(
     """
     Multiprocessing version with separate processes for environment stepping
     """
-     # Select reward function based on phase
+    # Add better debugging
+    print(f"Starting training with {num_envs} environments, phase {phase}")
+    
+    # Select reward function based on phase
     if phase == 1:
         reward_function = phase1_rewards
         print("Using Phase 1 rewards: Focus on logs")
@@ -1488,128 +1491,186 @@ def train_rl_mp(
         print("Using Phase 5 rewards: Focus on iron processing")
     else:
         raise ValueError(f"Invalid phase: {phase}")
-    #register_logs_sword_env()
+    
     # Set spawn method for multiprocessing
     try:
+        print("Setting multiprocessing start method to 'spawn'")
         mp.set_start_method('spawn', force=True)
+        print("Multiprocessing start method set successfully")
     except RuntimeError:
         print("Multiprocessing start method already set")
     
-    # Create dummy environment for agent initialization
-    #dummy_env = gym.make("LogsAndIronSword-v0")
-    dummy_env = HumanSurvival(**ENV_KWARGS).make()
-    agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-    
-    # Create agent for main thread
-    agent = MineRLAgent(
-        dummy_env, device="cuda",
-        policy_kwargs=agent_policy_kwargs,
-        pi_head_kwargs=agent_pi_head_kwargs
-    )
-    agent.load_weights(in_weights)
-    
-    # Create pretrained policy for KL divergence
-    pretrained_policy = MineRLAgent(
-        dummy_env, device="cuda",
-        policy_kwargs=agent_policy_kwargs,
-        pi_head_kwargs=agent_pi_head_kwargs
-    )
-    pretrained_policy.load_weights(in_weights)
-    
-    # Create phase coordinator
-    phase_coordinator = PhaseCoordinator()
-    
-    # Create multiprocessing shared objects
-    stop_flag = mp.Value('b', False)
-    action_queues = [Queue() for _ in range(num_envs)]
-    result_queue = Queue()
-    rollout_queue = RolloutQueue(maxsize=queue_size)
-    
-    # Start environment worker processes
-    workers = []
-    for env_id in range(num_envs):
-        p = Process(
-            target=env_worker,
-            args=(env_id, action_queues[env_id], result_queue, stop_flag, reward_function)
-        )
-        p.daemon = True
-        p.start()
-        workers.append(p)
-        time.sleep(0.4)
-    
-    # Thread stop flag (for clean shutdown)
-    thread_stop = [False]
-    
-    # Create and start threads
-    env_thread = threading.Thread(
-        target=environment_thread,
-        args=(
-            agent, 
-            rollout_steps, 
-            action_queues, 
-            result_queue, 
-            rollout_queue, 
-            out_episodes, 
-            thread_stop,
-            num_envs,
-            phase_coordinator  # Add phase coordinator
-        )
-    )
-    
-    train_thread = threading.Thread(
-        target=training_thread,
-        args=(
-            agent, 
-            pretrained_policy, 
-            rollout_queue, 
-            thread_stop, 
-            num_iterations,
-            phase_coordinator  # Add phase coordinator
-        )
-    )
-    
-    print("Starting threads...")
-    env_thread.start()
-    train_thread.start()
-    
     try:
-        # Wait for training thread to complete
-        train_thread.join()
-    except KeyboardInterrupt:
-        print("Interrupted by user, stopping threads and processes...")
-    finally:
-        # Signal threads and processes to stop
-        print("Setting stop flag...")
-        thread_stop[0] = True
-        stop_flag.value = True
+        # Create dummy environment for agent initialization
+        print("Creating dummy environment for agent initialization")
+        dummy_env = HumanSurvival(**ENV_KWARGS).make()
+        print("Dummy environment created successfully")
         
-        # Signal all workers to exit
-        for q in action_queues:
-            try:
-                q.put(None)  # Signal to exit
-            except:
-                pass
+        print(f"Loading model parameters from {in_model}")
+        agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
         
-        # Wait for threads to finish
-        print("Waiting for threads to finish...")
-        env_thread.join(timeout=10) #Might need to change timeout values
-        train_thread.join(timeout=5)
+        # Create agent for main thread
+        print("Creating agent")
+        agent = MineRLAgent(
+            dummy_env, device="cuda",
+            policy_kwargs=agent_policy_kwargs,
+            pi_head_kwargs=agent_pi_head_kwargs
+        )
         
-        # Wait for workers to finish
-        print("Waiting for worker processes to finish...")
+        print(f"Loading weights from {in_weights}")
+        agent.load_weights(in_weights)
+        
+        # Create pretrained policy for KL divergence
+        print("Creating pretrained policy")
+        pretrained_policy = MineRLAgent(
+            dummy_env, device="cuda",
+            policy_kwargs=agent_policy_kwargs,
+            pi_head_kwargs=agent_pi_head_kwargs
+        )
+        pretrained_policy.load_weights(in_weights)
+        print("Models initialized successfully")
+        
+        # Create phase coordinator
+        phase_coordinator = PhaseCoordinator()
+        
+        # Create multiprocessing shared objects
+        print("Creating shared objects")
+        stop_flag = mp.Value('b', False)
+        action_queues = [Queue() for _ in range(num_envs)]
+        result_queue = Queue()
+        rollout_queue = RolloutQueue(maxsize=queue_size)
+        
+        # Start environment worker processes with better error handling and increased delays
+        workers = []
+        print(f"Starting {num_envs} environment worker processes")
+        for env_id in range(num_envs):
+            print(f"Starting worker process {env_id}")
+            p = Process(
+                target=env_worker,
+                args=(env_id, action_queues[env_id], result_queue, stop_flag, reward_function)
+            )
+            p.daemon = True
+            p.start()
+            print(f"Worker process {env_id} started with PID {p.pid}")
+            workers.append(p)
+            # Increase delay between process starts to reduce resource contention
+            time.sleep(2.0)  # Increased from 0.4 to 2.0 seconds
+            
+            # Check if process is still alive after starting
+            if not p.is_alive():
+                print(f"WARNING: Worker {env_id} died immediately after starting")
+        
+        # Thread stop flag (for clean shutdown)
+        thread_stop = [False]
+        
+        # Wait a bit to ensure all processes are stable before starting threads
+        print("Waiting for worker processes to stabilize...")
+        time.sleep(5.0)
+        
+        # Verify all workers are still alive
         for i, p in enumerate(workers):
-            p.join(timeout=5) # Might need to change this
-            if p.is_alive():
-                print(f"Worker {i} did not terminate, force killing...")
-                p.terminate()
+            if not p.is_alive():
+                print(f"ERROR: Worker {i} is not running. Attempting restart...")
+                p = Process(
+                    target=env_worker,
+                    args=(i, action_queues[i], result_queue, stop_flag, reward_function)
+                )
+                p.daemon = True
+                p.start()
+                workers[i] = p
+                print(f"Worker {i} restarted with PID {p.pid}")
+                time.sleep(2.0)
         
-        # Close dummy environment
-        dummy_env.close()
+        # Create and start threads
+        print("Creating environment thread")
+        env_thread = threading.Thread(
+            target=environment_thread,
+            args=(
+                agent, 
+                rollout_steps, 
+                action_queues, 
+                result_queue, 
+                rollout_queue, 
+                out_episodes, 
+                thread_stop,
+                num_envs,
+                phase_coordinator
+            )
+        )
         
-        # Save weights
-        print(f"Saving weights to {out_weights}")
-        th.save(agent.policy.state_dict(), out_weights)
-
+        print("Creating training thread")
+        train_thread = threading.Thread(
+            target=training_thread,
+            args=(
+                agent, 
+                pretrained_policy, 
+                rollout_queue, 
+                thread_stop, 
+                num_iterations,
+                phase_coordinator
+            )
+        )
+        
+        print("Starting threads...")
+        env_thread.start()
+        print("Environment thread started")
+        train_thread.start()
+        print("Training thread started")
+        
+        try:
+            # Wait for training thread to complete
+            print("Waiting for training thread to complete...")
+            train_thread.join()
+            print("Training thread completed")
+        except KeyboardInterrupt:
+            print("Interrupted by user, stopping threads and processes...")
+        finally:
+            # Signal threads and processes to stop
+            print("Setting stop flag...")
+            thread_stop[0] = True
+            stop_flag.value = True
+            
+            # Signal all workers to exit
+            for q in action_queues:
+                try:
+                    q.put(None)  # Signal to exit
+                except:
+                    pass
+            
+            # Wait for threads to finish
+            print("Waiting for threads to finish...")
+            env_thread.join(timeout=10)
+            train_thread.join(timeout=5)
+            
+            # Wait for workers to finish
+            print("Waiting for worker processes to finish...")
+            for i, p in enumerate(workers):
+                p.join(timeout=5)
+                if p.is_alive():
+                    print(f"Worker {i} did not terminate, force killing...")
+                    p.terminate()
+            
+            # Close dummy environment
+            print("Closing dummy environment")
+            dummy_env.close()
+            
+            # Save weights
+            print(f"Saving weights to {out_weights}")
+            th.save(agent.policy.state_dict(), out_weights)
+            print("Weights saved successfully")
+            
+    except Exception as e:
+        print(f"CRITICAL ERROR in train_rl_mp: {e}")
+        import traceback
+        traceback.print_exc()
+        # Still try to save weights if possible
+        try:
+            if 'agent' in locals() and hasattr(agent, 'policy'):
+                print(f"Attempting to save weights after error to {out_weights}")
+                th.save(agent.policy.state_dict(), out_weights)
+                print("Weights saved after error")
+        except:
+            print("Could not save weights after error")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
