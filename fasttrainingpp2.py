@@ -286,8 +286,14 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     
     action_timeout = 0.01
     step_count = 0
+    last_diagnostic = time.time()
     
     while not stop_flag.value:
+        current_time = time.time()
+        if current_time - last_diagnostic > 60:  # Every minute
+            print(f"[Env {env_id}] Alive, processed {step_count} steps, "
+                  f"consecutive_errors={consecutive_errors}")
+            last_diagnostic = current_time
         try:
             # Get action from queue
             action = action_queue.get(timeout=action_timeout)
@@ -533,6 +539,21 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         # In environment_thread, update the check for stalled environments
         current_time = time.time()
         for env_id in range(num_envs):
+            # In environment_thread at the beginning of the main loop
+            empty_collection_count = 0
+            max_empty_collections = 5
+            
+            # After detecting zero transitions collected
+            if actual_transitions == 0:
+                empty_collection_count += 1
+                if empty_collection_count >= max_empty_collections:
+                    print("[Environment Thread] WARNING: Multiple empty collections, switching to synthetic data mode")
+                    # Generate synthetic transitions for training to at least make progress
+                    synthetic_rollouts = generate_synthetic_rollouts(agent, rollout_steps, num_envs)
+                    rollout_queue.put(synthetic_rollouts)
+                    continue
+            else:
+                empty_collection_count = 0  # Reset counter on successful collection
             if env_waiting_for_result[env_id]:
                 time_since_response = current_time - env_last_response[env_id]
                 if time_since_response > 120:  # 2 minutes without response
