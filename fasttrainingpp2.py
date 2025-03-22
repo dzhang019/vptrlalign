@@ -1282,7 +1282,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
 
 # Run policy optimization (wake phase)
 def run_policy_update_with_lwf(agent, pretrained_policy, rollouts, optimizer, scaler, 
-                          lwf_handler, value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0):
+                          lwf_handler, value_loss_coef=0.5, lambda_kl=10, max_grad_norm=1.0):
     """
     Run a PPO policy update (wake phase) on the provided rollouts with LwF.
     
