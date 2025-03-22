@@ -299,11 +299,11 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     last_message_time = time.time()  # Track last message time
 
     def send_heartbeat(env_id, result_queue):
-    try:
-        result_queue.put((env_id, "HEARTBEAT", None, False, 0, {"status": "alive"}), block=False)
-    except:
-        # Don't block if queue is full
-        pass
+        try:
+            result_queue.put((env_id, "HEARTBEAT", None, False, 0, {"status": "alive"}), block=False)
+        except:
+            # Don't block if queue is full
+            pass
     
     while not stop_flag.value:
         current_time = time.time()
