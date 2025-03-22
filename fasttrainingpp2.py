@@ -505,6 +505,10 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     # Track overall iteration timing
     last_heartbeat = time.time()
                            
+    # Initialize this variable at the beginning of the function,
+    # not just inside the collection loop
+    env_waiting_for_result = [False] * num_envs
+                           
     # Wait for initial observations from all environments
     for _ in range(num_envs):
         env_id, _, obs, _, _, _ = result_queue.get()
