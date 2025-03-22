@@ -287,10 +287,12 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     action_timeout = 0.01
     step_count = 0
     last_diagnostic = time.time()
+    last_message_time = time.time()  # Track last message time
+
     
     while not stop_flag.value:
         current_time = time.time()
-        if current_time - last_diagnostic > 60:  # Every minute
+        if current_time - last_diagnostic > 60 and step_count > 0:  # Every minute
             print(f"[Env {env_id}] Alive, processed {step_count} steps, "
                   f"consecutive_errors={consecutive_errors}")
             last_diagnostic = current_time
@@ -545,11 +547,22 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     iteration = 0
     while not stop_flag[0]:
         # Check if we're in auxiliary phase - if so, wait
-        while phase_coordinator.in_auxiliary_phase():
+        if phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
-            if phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0):
-                print("[Environment Thread] Resuming collection after auxiliary phase")
-                break  # Exit the inner loop when auxiliary phase is complete
+            aux_wait_start = time.time()
+            
+            # Wait for auxiliary phase to complete with a timeout
+            while phase_coordinator.in_auxiliary_phase() and time.time() - aux_wait_start < 300:
+                if phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0):
+                    break
+                time.sleep(0.1)  # Small sleep to prevent tight loop
+                
+            # If we're still in auxiliary phase after timeout, force continue
+            if phase_coordinator.in_auxiliary_phase():
+                print("[Environment Thread] WARNING: Auxiliary phase timeout exceeded, forcing continue")
+                continue
+                
+            print("[Environment Thread] Resuming collection after auxiliary phase")
         
         iteration += 1
         start_time = time.time()
