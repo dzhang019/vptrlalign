@@ -545,11 +545,11 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     iteration = 0
     while not stop_flag[0]:
         # Check if we're in auxiliary phase - if so, wait
-        if phase_coordinator.in_auxiliary_phase():
+        while phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
-            phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0)
-            if phase_coordinator.in_auxiliary_phase():
-                continue
+            if phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0):
+                print("[Environment Thread] Resuming collection after auxiliary phase")
+                break  # Exit the inner loop when auxiliary phase is complete
         
         iteration += 1
         start_time = time.time()
