@@ -215,7 +215,6 @@ def load_model_parameters(path_to_model_file):
 
 
 # Simple thread-safe queue for passing rollouts between threads
-# Simple thread-safe queue for passing rollouts between threads
 class RolloutQueue:
     def __init__(self, maxsize=10):
         self.queue = queue.Queue(maxsize=maxsize)
@@ -224,13 +223,13 @@ class RolloutQueue:
         self.queue.put(rollouts, block=True)
     
     def get(self, timeout=None):
-        if timeout is None:
-            return self.queue.get(block=True)
-        else:
+        # Support timeout parameter
+        if timeout is not None:
             try:
                 return self.queue.get(block=True, timeout=timeout)
             except queue.Empty:
-                raise queue.Empty("Queue get operation timed out")
+                raise queue.Empty("Timeout waiting for rollouts")
+        return self.queue.get(block=True)
     
     def qsize(self):
         return self.queue.qsize()
@@ -527,15 +526,33 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         start_time = time.time()
 
         # Print periodic heartbeat and status report
+        # In environment_thread, update the check for stalled environments
         current_time = time.time()
-        if current_time - last_heartbeat > 60:  # Every minute
-            active_envs = sum(1 for s in env_status if s == "ACTIVE")
-            print(f"[Environment Thread] HEARTBEAT - Active environments: {active_envs}/{num_envs}")
-            for env_id in range(num_envs):
+        for env_id in range(num_envs):
+            if env_waiting_for_result[env_id]:
                 time_since_response = current_time - env_last_response[env_id]
-                print(f"[Environment Thread] Env {env_id}: {env_status[env_id]}, "
-                      f"Last response: {time_since_response:.1f}s ago")
-            last_heartbeat = current_time
+                if time_since_response > 120:  # 2 minutes without response
+                    print(f"[Environment Thread] WARNING: Env {env_id} hasn't responded for {time_since_response:.1f}s")
+                    
+                    # More aggressive action: Force restart immediately after 2 minutes instead of waiting for 5
+                    try:
+                        # Clear the action queue
+                        while not action_queues[env_id].empty():
+                            action_queues[env_id].get_nowait()
+                            
+                        # Send termination signal
+                        action_queues[env_id].put(None)
+                        print(f"[Environment Thread] Forcing restart of env {env_id} due to {time_since_response:.1f}s without response")
+                        
+                        # Mark as not waiting
+                        env_waiting_for_result[env_id] = False
+                        env_status[env_id] = "RESTARTING"
+                        
+                        # Add this line to prevent continuous warnings about the same environment
+                        env_last_response[env_id] = current_time  # Reset the timer to avoid repeat warnings
+                    except Exception as e:
+                        print(f"[Environment Thread] Error restarting env {env_id}: {e}")
+                        env_status[env_id] = "ERROR"
             
         # Initialize rollouts for each environment
         rollouts = [
