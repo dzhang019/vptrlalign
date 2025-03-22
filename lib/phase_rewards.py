@@ -1,23 +1,43 @@
 def phase1_rewards(next_obs, done, info, visited_chunks=None, prev_inventory=None):
-    """Phase 1: Focus on gathering logs"""
+    """Phase 1: Exclusively focused on gathering logs"""
     reward = 0.0
     current_inventory = next_obs.get("inventory", {})
     
     # Calculate rewards based on inventory changes
     if prev_inventory is not None:
-        # Reward for logs (primary objective)
+        # STRONG reward for logs (primary objective)
         prev_logs = prev_inventory.get("log", 0)
         current_logs = current_inventory.get("log", 0)
+        
         if current_logs > prev_logs:
-            # Reward for gaining logs
-            reward += (current_logs - prev_logs) * 25.0
+            # Substantial reward for gaining logs
+            reward += (current_logs - prev_logs) * 50.0
+            
+            # Milestone bonuses
+            if current_logs >= 1 and prev_logs < 1:
+                reward += 100.0  # First log bonus
+            if current_logs >= 5 and prev_logs < 5:
+                reward += 250.0  # 5 logs bonus
+            if current_logs >= 10 and prev_logs < 10:
+                reward += 500.0  # 10 logs bonus
         elif current_logs < prev_logs:
-            # Penalty for losing logs
-            reward -= (prev_logs - current_logs) * 30.0
+            # Significant penalty for losing logs
+            reward -= (prev_logs - current_logs) * 75.0  # Higher penalty than the reward
+        
+        # Direct penalties for distractions
+        for distraction in ["wheat_seeds", "dandelion", "poppy", "azure_bluet", "oxeye_daisy"]:
+            prev_count = prev_inventory.get(distraction, 0)
+            current_count = current_inventory.get(distraction, 0)
+            if current_count > prev_count:
+                # Clear negative reward for distractions
+                reward -= (current_count - prev_count) * 5.0
     
-    # Death penalty
+    # Minimal death penalty (to prevent risk aversion)
     if done:
-        reward -= 200.0
+        reward -= 50.0
+        
+    # Small time penalty to discourage wandering
+    reward -= 0.1
     
     return reward, visited_chunks, current_inventory
 
