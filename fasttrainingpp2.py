@@ -32,7 +32,7 @@ class LwFHandler:
     This class manages the distillation process from the teacher model (original pretrained model)
     to the student model (model being fine-tuned).
     """
-    def __init__(self, teacher_model, temperature=2.0, lambda_distill=0.5):
+    def __init__(self, teacher_model, temperature=2.0, lambda_distill=0.9):
         """
         Initialize the LwF handler.
         
