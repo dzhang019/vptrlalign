@@ -280,7 +280,7 @@ class PhaseCoordinator:
 def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     # Create environment
     env = HumanSurvival(**ENV_KWARGS).make()
-
+    
     # Initialize
     obs = env.reset()
     visited_chunks = set()
@@ -291,35 +291,57 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     print(f"[Env {env_id}] Started")
     
     # Send initial observation to main process
-    result_queue.put((env_id, None, obs, False, 0, None))
+    try:
+        result_queue.put((env_id, None, obs, False, 0, None), block=True, timeout=5.0)
+    except queue.Full:
+        print(f"[Env {env_id}] WARNING: Result queue full when sending initial observation")
+        # Try again with a shorter timeout
+        try:
+            result_queue.put((env_id, None, obs, False, 0, None), block=True, timeout=1.0)
+        except queue.Full:
+            print(f"[Env {env_id}] ERROR: Result queue still full, continuing anyway")
     
-    action_timeout = 0.01
+    action_timeout = 0.1  # Increased from 0.01 to reduce CPU usage
     step_count = 0
     last_diagnostic = time.time()
-    last_message_time = time.time()  # Track last message time
-
-    def send_heartbeat(env_id, result_queue):
+    last_heartbeat = time.time()  # Track heartbeat time
+    
+    # Function to send heartbeat
+    def send_heartbeat():
         try:
-            result_queue.put((env_id, "HEARTBEAT", None, False, 0, {"status": "alive"}), block=False)
+            result_queue.put(
+                (env_id, "HEARTBEAT", None, False, 0, {"status": "alive", "steps": step_count}),
+                block=False
+            )
         except:
             # Don't block if queue is full
             pass
     
     while not stop_flag.value:
         current_time = time.time()
-        if current_time - last_heartbeat > 5.0:  # Every 5 seconds
-            send_heartbeat(env_id, result_queue)
-            last_heartbeat = current_time
+        
+        # Send periodic diagnostics
         if current_time - last_diagnostic > 60 and step_count > 0:  # Every minute
             print(f"[Env {env_id}] Alive, processed {step_count} steps, "
                   f"consecutive_errors={consecutive_errors}")
             last_diagnostic = current_time
+        
+        # Send heartbeat
+        if current_time - last_heartbeat > 5.0:  # Every 5 seconds
+            send_heartbeat()
+            last_heartbeat = current_time
+        
         try:
-            # Get action from queue
-            action = action_queue.get(timeout=action_timeout)
+            # Get action from queue with timeout
+            try:
+                action = action_queue.get(timeout=action_timeout)
+            except queue.Empty:
+                # No action available, just continue waiting
+                time.sleep(0.05)  # Small sleep to prevent tight loop
+                continue
             
-            if action is None:  # Signal to terminate
-                print(f"[Env {env_id}] Received termination signal, restarting environment")
+            if action is None:  # Signal to terminate or restart
+                print(f"[Env {env_id}] Received termination/restart signal")
                 try:
                     env.close()
                 except Exception as e:
@@ -337,11 +359,13 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                     print(f"[Env {env_id}] Environment successfully restarted")
                     
                     # Send initial observation from new environment
-                    result_queue.put((env_id, None, obs, False, 0, None))
+                    try:
+                        result_queue.put((env_id, None, obs, False, 0, None), block=True, timeout=5.0)
+                    except queue.Full:
+                        print(f"[Env {env_id}] WARNING: Result queue full after restart")
                 except Exception as restart_error:
                     print(f"[Env {env_id}] Failed to restart environment: {restart_error}")
                     time.sleep(5.0)  # Longer delay on restart failure
-                    continue
                 continue
                 
             # Step environment
@@ -356,13 +380,24 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                     print(f"[Env {env_id}] Beginning controlled shutdown and restart sequence")
                     
                     # 1. Send success notification with large reward
-                    success_reward = 5000.0
-                    result_queue.put((env_id, action, next_obs, True, success_reward, 
-                                     {'success': True, 'completed_task': 'craft_iron_sword'}))
+                    try:
+                        result_queue.put(
+                            (env_id, action, next_obs, True, 5000.0, 
+                             {'success': True, 'completed_task': 'craft_iron_sword'}),
+                            block=True, timeout=5.0
+                        )
+                    except queue.Full:
+                        print(f"[Env {env_id}] WARNING: Result queue full when sending success")
                     
                     # 2. Send explicit episode completion signal
-                    result_queue.put((env_id, None, None, True, episode_step_count, 
-                                     {'terminal_state': 'success'}))
+                    try:
+                        result_queue.put(
+                            (env_id, None, None, True, episode_step_count, 
+                             {'terminal_state': 'success'}),
+                            block=True, timeout=5.0
+                        )
+                    except queue.Full:
+                        print(f"[Env {env_id}] WARNING: Result queue full when sending episode completion")
                     
                     # 3. Properly close and recreate the environment
                     try:
@@ -387,9 +422,12 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                         consecutive_errors = 0
                         
                         # 7. Send initial observation from fresh environment
-                        result_queue.put((env_id, None, obs, False, 0, None))
-                        print(f"[Env {env_id}] New episode started after success")
-                        
+                        try:
+                            result_queue.put((env_id, None, obs, False, 0, None), block=True, timeout=5.0)
+                            print(f"[Env {env_id}] New episode started after success")
+                        except queue.Full:
+                            print(f"[Env {env_id}] WARNING: Result queue full when sending initial observation after success")
+                            
                     except Exception as restart_error:
                         print(f"[Env {env_id}] Failed to restart environment: {restart_error}")
                         time.sleep(5.0)  # Longer delay on restart failure
@@ -435,8 +473,11 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                         print(f"[Env {env_id}] Environment successfully reset after errors")
                         
                         # Send initial observation from new environment
-                        result_queue.put((env_id, None, obs, False, 0, None))
-                        continue
+                        try:
+                            result_queue.put((env_id, None, obs, False, 0, None), block=True, timeout=5.0)
+                            continue
+                        except queue.Full:
+                            print(f"[Env {env_id}] WARNING: Result queue full after error reset")
                     except Exception as reset_error:
                         print(f"[Env {env_id}] Failed to reset environment after errors: {reset_error}")
                         # Continue with normal error handling
@@ -458,12 +499,25 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
             # Increment step count
             episode_step_count += 1
             
-            # Send results back
-            result_queue.put((env_id, action, next_obs, done, custom_reward, info))
+            # Send results back with timeout
+            try:
+                result_queue.put(
+                    (env_id, action, next_obs, done, custom_reward, info),
+                    block=True, timeout=5.0
+                )
+            except queue.Full:
+                print(f"[Env {env_id}] WARNING: Result queue full when sending step result")
+                consecutive_errors += 1
             
             # Reset if episode is done
             if done:
-                result_queue.put((env_id, None, None, True, episode_step_count, None))  # Send episode complete signal
+                try:
+                    result_queue.put(
+                        (env_id, None, None, True, episode_step_count, None),
+                        block=True, timeout=5.0
+                    )  # Send episode complete signal
+                except queue.Full:
+                    print(f"[Env {env_id}] WARNING: Result queue full when sending episode complete signal")
                 
                 # Add delay before reset to improve stability
                 time.sleep(0.5)
@@ -474,14 +528,24 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                 prev_inventory = None  # Reset previous inventory
                 episode_step_count = 0
                 consecutive_errors = 0  # Reset error count on new episodes
-                result_queue.put((env_id, None, obs, False, 0, None))  # Send new observation
+                
+                try:
+                    result_queue.put(
+                        (env_id, None, obs, False, 0, None),
+                        block=True, timeout=5.0
+                    )  # Send new observation
+                except queue.Full:
+                    print(f"[Env {env_id}] WARNING: Result queue full when sending reset observation")
             else:
                 obs = next_obs
                 
         except queue.Empty:
+            # No action received, just continue
             continue
         except Exception as e:
-            print(f"[Env {env_id}] Error: {e}")
+            print(f"[Env {env_id}] Error in main loop: {e}")
+            import traceback
+            traceback.print_exc()
             consecutive_errors += 1
             
             # If too many errors occur outside the main loop, try to restart
@@ -504,14 +568,23 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
                     print(f"[Env {env_id}] Environment successfully restarted after critical errors")
                     
                     # Send initial observation from new environment
-                    result_queue.put((env_id, None, obs, False, 0, None))
+                    try:
+                        result_queue.put(
+                            (env_id, None, obs, False, 0, None),
+                            block=True, timeout=5.0
+                        )
+                    except queue.Full:
+                        print(f"[Env {env_id}] WARNING: Result queue full after critical error restart")
                 except Exception as restart_error:
                     print(f"[Env {env_id}] Failed to restart after critical errors: {restart_error}")
                     time.sleep(10.0)  # Longer cooldown period
             
     # Clean up
     print(f"[Env {env_id}] Processed {step_count} steps")
-    env.close()
+    try:
+        env.close()
+    except Exception as e:
+        print(f"[Env {env_id}] Error during final cleanup: {e}")
     print(f"[Env {env_id}] Stopped")
 
 # Thread for coordinating environments and collecting rollouts
@@ -544,7 +617,15 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     # Wait for initial observations from all environments with timeout
     while observation_count < num_envs and time.time() < observation_timeout:
         try:
-            env_id, _, obs, _, _, _ = result_queue.get(timeout=1.0)
+            env_id, action_type, obs, done, reward, info = result_queue.get(timeout=1.0)
+            
+            # Check if this is a heartbeat message
+            if action_type == "HEARTBEAT":
+                env_last_response[env_id] = time.time()
+                if env_status[env_id] != "ACTIVE":
+                    print(f"[Environment Thread] Received heartbeat from env {env_id}, status: {info.get('status', 'unknown')}")
+                continue
+                
             obs_list[env_id] = obs
             env_last_response[env_id] = time.time()
             env_status[env_id] = "ACTIVE"
@@ -565,11 +646,10 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     iteration = 0
     while not stop_flag[0]:
         # Check if we're in auxiliary phase - if so, wait
-       if phase_coordinator.in_auxiliary_phase():
-            print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
+        if phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
             
-            # Wait with proper timeout using the new method
+            # Wait for auxiliary phase to complete with proper timeout
             if not phase_coordinator.wait_for_auxiliary_completion(timeout=120):
                 print("[Environment Thread] WARNING: Auxiliary phase timeout exceeded, forcing continue")
             
@@ -625,17 +705,20 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 # Update hidden state
                 hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                 
-                # Send action to environment
+                # Send action to environment with timeout
                 try:
-                    action_queues[env_id].put(minerl_action)
+                    action_queues[env_id].put(minerl_action, block=True, timeout=1.0)
                     env_waiting_for_result[env_id] = True
+                except queue.Full:
+                    print(f"[Environment Thread] WARNING: Action queue full for env {env_id}, skipping step")
+                    env_status[env_id] = "QUEUE_FULL"
                 except Exception as e:
                     print(f"[Environment Thread] Error sending action to env {env_id}: {e}")
                     env_status[env_id] = "ERROR"
         
         # Process environment results until all steps are complete
         total_transitions = 0
-        result_timeout = 0.01
+        result_timeout = 0.05  # Increased from 0.01 to reduce CPU usage
         collection_start_time = time.time()
         max_collection_time = 300  # 5 minutes timeout for collection phase   
         
@@ -650,17 +733,22 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             # Check if auxiliary phase started during collection
             if phase_coordinator.in_auxiliary_phase():
                 print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
+                print(f"[Environment Thread] Iteration {iteration} - buffering {total_transitions} transitions")
                 break
             
             try:
                 # Get result from any environment
-                env_id, action, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
+                env_id, action_type, next_obs, done, reward, info = result_queue.get(timeout=result_timeout)
                 
                 # Update last response time
                 env_last_response[env_id] = time.time()
                 
+                # Handle heartbeat messages
+                if action_type == "HEARTBEAT":
+                    continue  # Skip further processing for heartbeats
+                
                 # Check if this is an episode completion signal
-                if action is None and done and next_obs is None:
+                if action_type is None and done and next_obs is None:
                     # This is an episode completion notification
                     episode_length = reward  # Using reward field to pass episode length
                     with open(out_episodes, "a") as f:
@@ -668,7 +756,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     continue  # Don't count this as a transition
                 
                 # Check if this is an observation update without stepping
-                if action is None and not done:
+                if action_type is None and not done:
                     obs_list[env_id] = next_obs
                     env_status[env_id] = "ACTIVE"
                     continue  # Don't count this as a transition
@@ -676,7 +764,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 # Normal step result - store in rollout if we were waiting for this environment
                 if env_waiting_for_result[env_id]:
                     rollouts[env_id]["obs"].append(obs_list[env_id])
-                    rollouts[env_id]["actions"].append(action)
+                    rollouts[env_id]["actions"].append(action_type)
                     rollouts[env_id]["rewards"].append(reward)
                     rollouts[env_id]["dones"].append(done)
                     rollouts[env_id]["hidden_states"].append(
@@ -715,10 +803,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                         # Update hidden state
                         hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                         
-                        # Send action to environment
+                        # Send action to environment with timeout
                         try:
-                            action_queues[env_id].put(minerl_action)
+                            action_queues[env_id].put(minerl_action, block=True, timeout=1.0)
                             env_waiting_for_result[env_id] = True
+                        except queue.Full:
+                            print(f"[Environment Thread] WARNING: Action queue full for env {env_id}, skipping step")
+                            env_status[env_id] = "QUEUE_FULL"
                         except Exception as e:
                             print(f"[Environment Thread] Error sending action to env {env_id}: {e}")
                             env_status[env_id] = "ERROR"
@@ -728,43 +819,48 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 for env_id in range(num_envs):
                     if env_waiting_for_result[env_id]:
                         time_since_response = current_time - env_last_response[env_id]
-                        if time_since_response > 120:  # 2 minutes without response
-                            print(f"[Environment Thread] WARNING: Env {env_id} hasn't responded for {time_since_response:.1f}s")
-                            env_status[env_id] = "STALLED"
+                        if time_since_response > 60:  # 1 minute without response
+                            print(f"[Environment Thread] WARNING: Env {env_id} unresponsive for {time_since_response:.1f}s")
                             
-                        if time_since_response > 300:  # 5 minutes without response
-                            print(f"[Environment Thread] CRITICAL: Env {env_id} stalled for {time_since_response:.1f}s, forcing restart")
-                            # Force restart this environment
-                            try:
-                                # Clear the action queue
-                                while not action_queues[env_id].empty():
-                                    action_queues[env_id].get_nowait()
+                            # Force restart this environment more aggressively
+                            if time_since_response > 120 and env_status[env_id] != "RESTARTING":  # 2 minutes without response
+                                print(f"[Environment Thread] CRITICAL: Env {env_id} stalled for {time_since_response:.1f}s, forcing restart")
+                                try:
+                                    # Clear the action queue
+                                    while not action_queues[env_id].empty():
+                                        try:
+                                            action_queues[env_id].get_nowait()
+                                        except:
+                                            pass
+                                            
+                                    # Send termination signal
+                                    action_queues[env_id].put(None)
+                                    print(f"[Environment Thread] Sent termination signal to env {env_id}")
                                     
-                                # Send termination signal
-                                action_queues[env_id].put(None)
-                                print(f"[Environment Thread] Sent termination signal to env {env_id}")
-                                
-                                # Mark as not waiting
-                                env_waiting_for_result[env_id] = False
-                                env_status[env_id] = "RESTARTING"
-                                # Reset the timer to avoid repeat warnings
-                                env_last_response[env_id] = current_time
-                            except Exception as e:
-                                print(f"[Environment Thread] Error restarting env {env_id}: {e}")
-                                env_status[env_id] = "ERROR"
+                                    # Mark as not waiting
+                                    env_waiting_for_result[env_id] = False
+                                    env_status[env_id] = "RESTARTING"
+                                    # Reset the timer to avoid repeat warnings
+                                    env_last_response[env_id] = current_time
+                                except Exception as e:
+                                    print(f"[Environment Thread] Error restarting env {env_id}: {e}")
+                                    env_status[env_id] = "ERROR"
                 continue
 
         # Check for stalled environments before finalizing rollouts
         current_time = time.time()
         for env_id in range(num_envs):
             time_since_response = current_time - env_last_response[env_id]
-            if time_since_response > 300 and env_status[env_id] != "RESTARTING":  # 5 minutes without response
+            if time_since_response > 180 and env_status[env_id] != "RESTARTING":  # 3 minutes without response
                 print(f"[Environment Thread] Environment {env_id} hasn't responded for {time_since_response:.1f}s, forcing restart")
                 # Force restart this environment
                 try:
                     # Clear the action queue
                     while not action_queues[env_id].empty():
-                        action_queues[env_id].get_nowait()
+                        try:
+                            action_queues[env_id].get_nowait()
+                        except:
+                            pass
                         
                     # Send termination signal
                     action_queues[env_id].put(None)
@@ -800,14 +896,23 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
             end_time = time.time()
             duration = end_time - start_time
             
-            rollout_queue.put(rollouts)
-            
-            print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions "
-                f"across {num_envs} envs in {duration:.3f}s")
+            # Only put in queue if we actually have transitions
+            if actual_transitions > 0:
+                try:
+                    rollout_queue.put(rollouts, block=True, timeout=10.0)
+                    print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions "
+                        f"across {num_envs} envs in {duration:.3f}s")
+                except queue.Full:
+                    print(f"[Environment Thread] WARNING: Rollout queue full, could not send rollouts")
+            else:
+                print(f"[Environment Thread] Iteration {iteration} collected no transitions after {duration:.3f}s")
         else:
             # Buffer the rollouts for later use
-            phase_coordinator.buffer_rollout(rollouts)
-            print(f"[Environment Thread] Iteration {iteration} - buffering {actual_transitions} transitions")
+            if actual_transitions > 0:
+                phase_coordinator.buffer_rollout(rollouts)
+                print(f"[Environment Thread] Iteration {iteration} - buffering {actual_transitions} transitions")
+            else:
+                print(f"[Environment Thread] Iteration {iteration} - no transitions to buffer")
 
 def generate_synthetic_rollouts(agent, rollout_steps, num_envs):
     """Generate synthetic rollouts for training when environments fail."""
@@ -1001,7 +1106,7 @@ def get_recent_rollouts(stored_rollouts, max_rollouts=5):
 
 # Run a PPG sleep phase
 # Run a PPG sleep phase
-def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
+def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, num_envs=1, max_grad_norm=1.0, beta_clone=1.0):
     """Run the PPG auxiliary phase with proper memory cleanup between rollouts."""
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if not has_aux_head:
@@ -1013,9 +1118,15 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     # Track memory usage
     print(f"Initial CUDA memory: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     
-    # Maximum sequence length to process at once
-    MAX_SEQ_LEN = 64
-    BATCH_SIZE = 16
+    # Maximum sequence length to process at once - adjust based on environment count
+    if num_envs > 1:
+        # Reduce batch size when running multiple environments
+        BATCH_SIZE = max(4, 16 // num_envs)
+        MAX_SEQ_LEN = max(16, 64 // num_envs)
+        print(f"[Sleep Phase] Using reduced batch size {BATCH_SIZE} for {num_envs} environments")
+    else:
+        MAX_SEQ_LEN = 64
+        BATCH_SIZE = 16
     
     # First cycle: Process rollouts, compute auxiliary value loss, and store original distributions
     print("[Sleep Phase] Running cycle 1/2")
@@ -1152,6 +1263,10 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
             if 'aux_value_loss' in locals() and isinstance(aux_value_loss, th.Tensor):
                 del aux_value_loss
             
+            # Report memory usage periodically
+            if (batch_start % (5 * BATCH_SIZE)) == 0:
+                print(f"[Sleep Phase] Memory usage: {th.cuda.memory_allocated() / 1e9:.2f} GB")
+            
             # Force clear cache
             th.cuda.empty_cache()
         
@@ -1168,7 +1283,6 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         print(f"After rollout {rollout_idx+1} processing: {th.cuda.memory_allocated() / 1e9:.2f} GB")
         print(f"Stored {orig_dist_count} original distributions")
     
-    # Rest of the function remains unchanged...
     # Report statistics for cycle 1
     if num_transitions > 0:
         avg_aux_value_loss = aux_value_loss_sum / num_transitions
@@ -1285,6 +1399,10 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         if 'loss' in locals() and isinstance(loss, th.Tensor):
             del loss
         
+        # Report memory usage periodically
+        if (batch_start % (5 * BATCH_SIZE)) == 0:
+            print(f"[Sleep Phase] Memory usage cycle 2: {th.cuda.memory_allocated() / 1e9:.2f} GB")
+        
         # Force clear cache
         th.cuda.empty_cache()
     
@@ -1302,6 +1420,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     # Final cleanup and memory usage reporting
     del cycle2_data
     th.cuda.empty_cache()
+    print(f"Final CUDA memory after sleep phase: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     print("[Sleep Phase] Completed")
 
 # Run policy optimization (wake phase)
@@ -1581,6 +1700,42 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
 
+def process_watchdog(workers, action_queues, result_queue, stop_flag, reward_function, check_interval=30):
+    """Monitor worker processes and restart any that have died."""
+    print("[Watchdog] Process watchdog started")
+    
+    while not stop_flag.value:
+        time.sleep(check_interval)
+        for i, p in enumerate(workers):
+            if not p.is_alive():
+                print(f"[Watchdog] Worker {i} is dead, attempting restart...")
+                
+                # Try to clear the action queue if possible
+                try:
+                    while not action_queues[i].empty():
+                        action_queues[i].get_nowait()
+                except:
+                    pass
+                
+                # Create a new worker process
+                p_new = Process(
+                    target=env_worker,
+                    args=(i, action_queues[i], result_queue, stop_flag, reward_function)
+                )
+                p_new.daemon = True
+                
+                try:
+                    p_new.start()
+                    workers[i] = p_new
+                    print(f"[Watchdog] Worker {i} restarted with PID {p_new.pid}")
+                except Exception as e:
+                    print(f"[Watchdog] Failed to restart worker {i}: {e}")
+                    
+                # Add a delay between restarts to reduce resource contention
+                time.sleep(2.0)
+                
+    print("[Watchdog] Process watchdog stopped")
+
 def train_rl_mp(
     in_model,
     in_weights,
@@ -1661,8 +1816,8 @@ def train_rl_mp(
         # Create multiprocessing shared objects
         print("Creating shared objects")
         stop_flag = mp.Value('b', False)
-        action_queues = [Queue() for _ in range(num_envs)]
-        result_queue = Queue()
+        action_queues = [Queue(maxsize=5) for _ in range(num_envs)]  # Set max size to prevent memory issues
+        result_queue = Queue(maxsize=num_envs * rollout_steps * 2)  # Allow enough space for results
         rollout_queue = RolloutQueue(maxsize=queue_size)
         
         # Start environment worker processes with better error handling and increased delays
@@ -1705,6 +1860,15 @@ def train_rl_mp(
                 workers[i] = p
                 print(f"Worker {i} restarted with PID {p.pid}")
                 time.sleep(2.0)
+        
+        # Start the process watchdog thread
+        watchdog_thread = threading.Thread(
+            target=process_watchdog,
+            args=(workers, action_queues, result_queue, stop_flag, reward_function)
+        )
+        watchdog_thread.daemon = True
+        watchdog_thread.start()
+        print("Process watchdog started")
         
         # Create and start threads
         print("Creating environment thread")
@@ -1758,7 +1922,9 @@ def train_rl_mp(
             # Signal all workers to exit
             for q in action_queues:
                 try:
-                    q.put(None)  # Signal to exit
+                    q.put(None, block=True, timeout=1.0)  # Signal to exit with timeout
+                except queue.Full:
+                    print("WARNING: Action queue full, unable to send exit signal")
                 except:
                     pass
             
@@ -1797,36 +1963,3 @@ def train_rl_mp(
                 print("Weights saved after error")
         except:
             print("Could not save weights after error")
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("--in-model", required=True, type=str)
-    parser.add_argument("--in-weights", required=True, type=str)
-    parser.add_argument("--out-weights", required=True, type=str)
-    parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
-    parser.add_argument("--num-iterations", required=False, type=int, default=10)
-    parser.add_argument("--rollout-steps", required=False, type=int, default=40)
-    parser.add_argument("--num-envs", required=False, type=int, default=4)
-    parser.add_argument("--queue-size", required=False, type=int, default=3,
-                       help="Size of the queue between environment and training threads")
-    parser.add_argument("--phase", type=int, default=1, choices=[1, 2, 3, 4, 5],
-                   help="Training phase (1-5)")
-
-    args = parser.parse_args()
-    
-    # Check for auxiliary value head in weights
-    weights = th.load(args.in_weights, map_location="cpu")
-    has_aux_head = any('aux' in key for key in weights.keys())
-    print(f"Model weights {'have' if has_aux_head else 'do not have'} auxiliary value head keys")
-
-    train_rl_mp(
-        in_model=args.in_model,
-        in_weights=args.in_weights,
-        out_weights=args.out_weights,
-        out_episodes=args.out_episodes,
-        num_iterations=args.num_iterations,
-        rollout_steps=args.rollout_steps,
-        num_envs=args.num_envs,
-        queue_size=args.queue_size,
-        phase=args.phase
-    )
