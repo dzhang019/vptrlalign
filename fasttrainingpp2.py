@@ -267,20 +267,11 @@ class PhaseCoordinator:
             self.rollout_buffer = []
             return rollouts
 
-    def wait_for_auxiliary_completion(self, timeout=60):
-        """Wait for auxiliary phase to complete with proper timeout handling."""
-        start_time = time.time()
-        while self.in_auxiliary_phase() and time.time() - start_time < timeout:
-            if self.auxiliary_phase_complete.wait(timeout=1.0):
-                return True
-            time.sleep(0.1)
-        return not self.in_auxiliary_phase()
-
 
 def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     # Create environment
     env = HumanSurvival(**ENV_KWARGS).make()
-
+    
     # Initialize
     obs = env.reset()
     visited_chunks = set()
@@ -298,18 +289,9 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, reward_function):
     last_diagnostic = time.time()
     last_message_time = time.time()  # Track last message time
 
-    def send_heartbeat(env_id, result_queue):
-        try:
-            result_queue.put((env_id, "HEARTBEAT", None, False, 0, {"status": "alive"}), block=False)
-        except:
-            # Don't block if queue is full
-            pass
     
     while not stop_flag.value:
         current_time = time.time()
-        if current_time - last_heartbeat > 5.0:  # Every 5 seconds
-            send_heartbeat(env_id, result_queue)
-            last_heartbeat = current_time
         if current_time - last_diagnostic > 60 and step_count > 0:  # Every minute
             print(f"[Env {env_id}] Alive, processed {step_count} steps, "
                   f"consecutive_errors={consecutive_errors}")
@@ -565,14 +547,21 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
     iteration = 0
     while not stop_flag[0]:
         # Check if we're in auxiliary phase - if so, wait
-       if phase_coordinator.in_auxiliary_phase():
-            print(f"[Environment Thread] Auxiliary phase started during collection, step {total_transitions}/{rollout_steps * num_envs}")
+        if phase_coordinator.in_auxiliary_phase():
             print("[Environment Thread] Pausing collection during auxiliary phase")
+            aux_wait_start = time.time()
             
-            # Wait with proper timeout using the new method
-            if not phase_coordinator.wait_for_auxiliary_completion(timeout=120):
+            # Wait for auxiliary phase to complete with a timeout
+            while phase_coordinator.in_auxiliary_phase() and time.time() - aux_wait_start < 300:
+                if phase_coordinator.auxiliary_phase_complete.wait(timeout=1.0):
+                    break
+                time.sleep(0.1)  # Small sleep to prevent tight loop
+                
+            # If we're still in auxiliary phase after timeout, force continue
+            if phase_coordinator.in_auxiliary_phase():
                 print("[Environment Thread] WARNING: Auxiliary phase timeout exceeded, forcing continue")
-            
+                continue
+                
             print("[Environment Thread] Resuming collection after auxiliary phase")
         
         iteration += 1
