@@ -869,13 +869,13 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         phase_coordinator: Coordinator for synchronizing phases between threads
     """
     # Hyperparameters
-    LEARNING_RATE = 1e-6
+    LEARNING_RATE = 1e-5
     MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 20.0
+    LAMBDA_KL = 0.5
     GAMMA = 0.9999
     LAM = 0.95
-    VALUE_LOSS_COEF = 0.5
-    KL_DECAY = 0.9995
+    VALUE_LOSS_COEF = 1
+    KL_DECAY = 0.99
     
     # PPG specific hyperparameters
     PPG_ENABLED = True  # Enable/disable PPG
