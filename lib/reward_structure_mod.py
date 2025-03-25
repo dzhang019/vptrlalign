@@ -56,7 +56,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
         location_stats = obs["location_stats"]
         xpos = location_stats.get("xpos", 0)
         ypos = location_stats.get("ypos", 0)
-        zpos = location_stats.get("zpos", 0)1098-T Tax Form
+        zpos = location_stats.get("zpos", 0)
 
     current_chunk = (int(xpos) // 16, int(zpos) // 16)
     chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
