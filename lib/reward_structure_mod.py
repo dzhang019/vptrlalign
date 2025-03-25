@@ -56,13 +56,14 @@ def custom_reward_function(obs, done, info, visited_chunks):
         location_stats = obs["location_stats"]
         xpos = location_stats.get("xpos", 0)
         ypos = location_stats.get("ypos", 0)
-        zpos = location_stats.get("zpos", 0)
+        zpos = location_stats.get("zpos", 0)1098-T Tax Form
 
     current_chunk = (int(xpos) // 16, int(zpos) // 16)
     chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
-    if chunk_key not in visited_chunks and len(visited_chunks)>3:
-        reward += 5  # Reward for exploring new chunks
+    if chunk_key not in visited_chunks:
         visited_chunks[chunk_key] = True
+        if len(visited_chunks)>3:
+            reward += 5  # Reward for exploring new chunks
         print("visited new chunk!")
 
     # Exploration reward: New depths
