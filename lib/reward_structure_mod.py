@@ -38,10 +38,10 @@ def custom_reward_function(obs, done, info, visited_chunks):
             reward -= 0.05 * abs(health_change)
             print(f"took {health_change} damage")
     visited_chunks[HEALTH_KEY] = current_health
-    if current_health <= 4:  # 2 hearts or less
-        # Exponential penalty as health approaches zero
-        reward -= 0.2 * (5 - current_health)**2
-        print("below 2 hearts")
+    # if current_health <= 4:  # 2 hearts or less
+    #     # Exponential penalty as health approaches zero
+    #     reward -= 0.2 * (5 - current_health)**2
+    #     print("below 2 hearts")
     # if "life_stats" in obs:
     #     life_stats = obs["life_stats"]
     #     #if life_stats.get("life", 20) < 10:  # Assuming 20 is max health

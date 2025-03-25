@@ -10,6 +10,9 @@ import gym
 import minerl
 import torch as th
 import numpy as np
+import os
+import json
+from collections import defaultdict
 
 from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
@@ -22,6 +25,47 @@ from torchvision import transforms
 from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
+class SimpleDebugLogger:
+    def __init__(self, log_dir="debug_logs"):
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_file = open(os.path.join(log_dir, "training_debug.jsonl"), "a")
+        self.episode_file = open(os.path.join(log_dir, "episodes.jsonl"), "a")
+        self.step_counter = 0
+        self.update_counter = 0
+        
+    def log_update(self, policy_loss, value_loss, kl_loss, transitions, lambda_kl):
+        """Log basic statistics from a policy update"""
+        self.update_counter += 1
+        data = {
+            "update": self.update_counter,
+            "timestamp": time.time(),
+            "policy_loss": float(policy_loss),
+            "value_loss": float(value_loss),
+            "kl_loss": float(kl_loss),
+            "transitions": transitions,
+            "lambda_kl": float(lambda_kl)
+        }
+        self.log_file.write(json.dumps(data) + "\n")
+        self.log_file.flush()
+    
+    def log_episode(self, env_id, length, total_reward):
+        """Log episode completion"""
+        data = {
+            "timestamp": time.time(),
+            "update": self.update_counter,
+            "env_id": env_id,
+            "length": int(length),
+            "total_reward": float(total_reward)
+        }
+        self.episode_file.write(json.dumps(data) + "\n")
+        self.episode_file.flush()
+        
+    def close(self):
+        """Close log files"""
+        self.log_file.close()
+        self.episode_file.close()
+#global logger
+debug_logger = SimpleDebugLogger()
 
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
@@ -117,7 +161,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             
             # Apply death penalty if done
             if done:
-                custom_reward -= 2000.0
+                custom_reward -= 300.0
                 
             # Increment step count
             episode_step_count += 1
@@ -234,6 +278,8 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     episode_length = reward  # Using reward field to pass episode length
                     with open(out_episodes, "a") as f:
                         f.write(f"{episode_length}\n")
+                    total_reward = sum(rollouts[env_id]["rewards"]) if rollouts[env_id]["rewards"] else 0
+                    debug_logger.log_episode(env_id, episode_length, total_reward)
                     continue  # Don't count this as a transition
                 
                 # Check if this is an observation update without stepping
@@ -844,6 +890,14 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
     
     # Apply gradients
     scaler.unscale_(optimizer)
+
+    total_norm = 0.0
+    for p in agent.policy.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+
     th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
     scaler.step(optimizer)
     scaler.update()
@@ -853,7 +907,14 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
     avg_value_loss = total_value_loss / num_valid_envs
     avg_kl_loss = total_kl_loss / num_valid_envs
     
-    return avg_policy_loss, avg_value_loss, avg_kl_loss, total_transitions
+    debug_logger.log_update(
+        avg_policy_loss, 
+        avg_value_loss,
+        avg_kl_loss,
+        total_transitions,
+        lambda_kl
+    )
+    return avg_policy_loss, avg_value_loss, avg_kl_loss, total_transitions, total_norm
 
 
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator):
@@ -970,7 +1031,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             print(f"[Training Thread] Processing rollouts for iteration {iteration}")
             
             # Run policy update
-            avg_policy_loss, avg_value_loss, avg_kl_loss, num_transitions = run_policy_update(
+            avg_policy_loss, avg_value_loss, avg_kl_loss, num_transitions, grad_norm = run_policy_update(
                 agent=agent,
                 pretrained_policy=pretrained_policy,
                 rollouts=rollouts,
@@ -987,7 +1048,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
             print(f"[Training Thread] Policy Phase {pi_update_counter}/{PPG_N_PI_UPDATES} - "
                   f"Time: {train_duration:.3f}s, Transitions: {num_transitions}, "
                   f"PolicyLoss: {avg_policy_loss:.4f}, ValueLoss: {avg_value_loss:.4f}, "
-                  f"KLLoss: {avg_kl_loss:.4f}")
+                  f"KLLoss: {avg_kl_loss:.4f}, GradNorm: {grad_norm:.4f}")
             
             # Update running stats
             running_loss += (avg_policy_loss + avg_value_loss + avg_kl_loss) * num_transitions
@@ -1123,6 +1184,7 @@ def train_rl_mp(
         # Close dummy environment
         dummy_env.close()
         
+        debug_logger.close()
         # Save weights
         print(f"Saving weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
