@@ -162,6 +162,8 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             # Apply death penalty if done
             if done:
                 custom_reward -= 300.0
+            #test
+            custom_reward *= 100
                 
             # Increment step count
             episode_step_count += 1
