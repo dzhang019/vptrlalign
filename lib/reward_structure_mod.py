@@ -58,12 +58,12 @@ def custom_reward_function(obs, done, info, visited_chunks):
         ypos = location_stats.get("ypos", 0)
         zpos = location_stats.get("zpos", 0)
 
-    current_chunk = (int(xpos) // 16, int(zpos) // 16)
+    current_chunk = (int(xpos) // 4, int(zpos) // 4)
     chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
     if chunk_key not in visited_chunks:
         visited_chunks[chunk_key] = True
         if len(visited_chunks)>3:
-            reward += 5  # Reward for exploring new chunks
+            reward += 2  # Reward for exploring new chunks
         print("visited new chunk!")
 
     # Exploration reward: New depths
