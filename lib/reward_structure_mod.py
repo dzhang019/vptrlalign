@@ -60,8 +60,8 @@ def custom_reward_function(obs, done, info, visited_chunks):
 
     current_chunk = (int(xpos) // 16, int(zpos) // 16)
     chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
-    if chunk_key not in visited_chunks:
-        reward += 2  # Reward for exploring new chunks
+    if chunk_key not in visited_chunks and len(visited_chunks)>3:
+        reward += 5  # Reward for exploring new chunks
         visited_chunks[chunk_key] = True
         print("visited new chunk!")
 
