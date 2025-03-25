@@ -162,8 +162,6 @@ def env_worker(env_id, action_queue, result_queue, stop_flag):
             # Apply death penalty if done
             if done:
                 custom_reward -= 300.0
-            #test
-            custom_reward *= 100
                 
             # Increment step count
             episode_step_count += 1
@@ -804,7 +802,7 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
 
 # Run policy optimization (wake phase)
 def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler, 
-                      value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0):
+                      value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0, gamma=0.995, lam=0.95):
     """
     Run a PPO policy update (wake phase) on the provided rollouts.
     
@@ -840,8 +838,8 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
             agent,
             pretrained_policy,
             env_rollout,
-            gamma=0.9999,
-            lam=0.95
+            gamma=gamma,
+            lam=lam
         )
         
         if len(env_transitions) == 0:
@@ -932,13 +930,13 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
         phase_coordinator: Coordinator for synchronizing phases between threads
     """
     # Hyperparameters
-    LEARNING_RATE = 3e-5
+    LEARNING_RATE = 1e-5
     MAX_GRAD_NORM = 1.0
-    LAMBDA_KL = 2.0
+    LAMBDA_KL = 0.2
     GAMMA = 0.995
     LAM = 0.95
     VALUE_LOSS_COEF = 1
-    KL_DECAY = 0.9996
+    KL_DECAY = 0.9995
     
     # PPG specific hyperparameters
     PPG_ENABLED = False  # Enable/disable PPG
@@ -1041,7 +1039,9 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 scaler=scaler,
                 value_loss_coef=VALUE_LOSS_COEF,
                 lambda_kl=LAMBDA_KL,
-                max_grad_norm=MAX_GRAD_NORM
+                max_grad_norm=MAX_GRAD_NORM,
+                gamma=GAMMA,
+                lam=LAM
             )
             
             # Report statistics
