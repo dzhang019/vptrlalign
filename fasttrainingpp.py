@@ -878,7 +878,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     KL_DECAY = 0.99
     
     # PPG specific hyperparameters
-    PPG_ENABLED = True  # Enable/disable PPG
+    PPG_ENABLED = False  # Enable/disable PPG
     PPG_N_PI_UPDATES = 8  # Number of policy updates before auxiliary phase
     PPG_BETA_CLONE = 1.0  # Weight for the policy distillation loss
     
