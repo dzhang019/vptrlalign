@@ -22,7 +22,7 @@ from lib.tree_util import tree_map
 from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
-from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+#from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
 
 class SimpleDebugLogger:
@@ -123,9 +123,9 @@ class PhaseCoordinator:
             return rollouts
 
 
-def env_worker(env_id, action_queue, result_queue, stop_flag):
+def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass):
     # Create environment
-    env = HumanSurvival(**ENV_KWARGS).make()
+    env = HumanSurvivalClass(**ENV_KWARGS).make()
     
     # Initialize
     obs = env.reset()
@@ -196,8 +196,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                        out_episodes, stop_flag, num_envs, phase_coordinator):
     # Initialize tracking variables
     obs_list = [None] * num_envs
-    done_list = [False] * num_envs
-    episode_step_counts = [0] * num_envs
+    episode_total_rewards = [0.0] * num_envs
     hidden_states = [agent.policy.initial_state(batch_size=1) for _ in range(num_envs)]
     
     # Wait for initial observations from all environments
@@ -276,11 +275,13 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 if action is None and done and next_obs is None:
                     # This is an episode completion notification
                     episode_length = reward  # Using reward field to pass episode length
+                    # Log episode with total accumulated reward
                     with open(out_episodes, "a") as f:
-                        f.write(f"{episode_length}\n")
-                    total_reward = sum(rollouts[env_id]["rewards"]) if rollouts[env_id]["rewards"] else 0
-                    debug_logger.log_episode(env_id, episode_length, total_reward)
-                    continue  # Don't count this as a transition
+                        f.write(f"{episode_length}\t{episode_total_rewards[env_id]}\n")
+                    debug_logger.log_episode(env_id, episode_length, episode_total_rewards[env_id])
+                    # Reset the reward counter
+                    episode_total_rewards[env_id] = 0.0
+                    continue
                 
                 # Check if this is an observation update without stepping
                 if action is None and not done:
@@ -297,7 +298,7 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                         tree_map(lambda x: x.detach().cpu().contiguous(), hidden_states[env_id])
                     )
                     rollouts[env_id]["next_obs"].append(next_obs)
-                    
+                    episode_total_rewards[env_id] += reward
                     # Update state
                     obs_list[env_id] = next_obs
                     
@@ -1065,7 +1066,8 @@ def train_rl_mp(
     num_iterations=10,
     rollout_steps=40,
     num_envs=2,
-    queue_size=3
+    queue_size=3,
+    use_night_bias=False
 ):
     """
     Multiprocessing version with separate processes for environment stepping
@@ -1077,7 +1079,15 @@ def train_rl_mp(
         print("Multiprocessing start method already set")
     
     # Create dummy environment for agent initialization
-    dummy_env = HumanSurvival(**ENV_KWARGS).make()
+    if use_night_bias:
+        # Import night-biased version
+        print("Using night-biased environment")
+        from minerl.herobraine.env_specs.human_survival_specs_night import HumanSurvival as HumanSurvivalClass
+    else:
+        # Import regular version
+        print("Using standard environment")
+        from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival as HumanSurvivalClass
+    dummy_env = HumanSurvivalClass(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
     # Create agent for main thread
@@ -1110,7 +1120,7 @@ def train_rl_mp(
     for env_id in range(num_envs):
         p = Process(
             target=env_worker,
-            args=(env_id, action_queues[env_id], result_queue, stop_flag)
+            args=(env_id, action_queues[env_id], result_queue, stop_flag, HumanSurvivalClass)
         )
         p.daemon = True
         p.start()
@@ -1203,6 +1213,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-envs", required=False, type=int, default=4)
     parser.add_argument("--queue-size", required=False, type=int, default=3,
                        help="Size of the queue between environment and training threads")
+    parser.add_argument("--night-bias", action="store_true", 
+                       help="Use night-biased environment for better night-time training")
 
     args = parser.parse_args()
     
@@ -1219,5 +1231,6 @@ if __name__ == "__main__":
         num_iterations=args.num_iterations,
         rollout_steps=args.rollout_steps,
         num_envs=args.num_envs,
-        queue_size=args.queue_size
+        queue_size=args.queue_size,
+        use_night_bias=args.night_bias
     )
