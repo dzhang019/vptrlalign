@@ -73,12 +73,14 @@ def custom_reward_function(obs, done, info, visited_chunks):
     #     visited_chunks.add(ypos_rounded)
 
     # Exploration reward: New biomes
-    biome_id = info.get("biome_id", None)
-    if biome_id is not None:
+    location_stats = obs["location_stats"]
+    biome_id = location_stats.get("biome_id", 0)
+    if biome_id is not 0:
         biome_key = f"biome_{biome_id}"
         if biome_key not in visited_chunks:
-            reward += 20  # Reward for discovering new biomes
             visited_chunks[biome_key] = True
             print("visited new biome!")
+            if len(visited_chunks)>3:
+                reward += 50  # Reward for discovering new biomes
 
     return reward, visited_chunks
