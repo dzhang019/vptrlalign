@@ -161,7 +161,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass
             
             # Apply death penalty if done
             if done:
-                custom_reward -= 100.0
+                custom_reward -= 30.0
                 
             # Increment step count
             episode_step_count += 1
@@ -936,11 +936,11 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     # LAMBDA_KL = 0.2
     #march 26 mod
     #LAMBDA_KL =  0.13
-    LAMBDA_KL =  0.101
+    LAMBDA_KL =  0.15
     GAMMA = 0.995
     LAM = 0.95
     VALUE_LOSS_COEF = 1.3
-    KL_DECAY = 0.9995
+    KL_DECAY = 0.9996
     
     # PPG specific hyperparameters
     PPG_ENABLED = False  # Enable/disable PPG

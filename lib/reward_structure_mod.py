@@ -35,7 +35,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
         #print("health_change:{health_change}")
         if health_change < 0:
             # Penalty for damage taken
-            reward -= 2 * abs(health_change)
+            reward -= 0.8 * abs(health_change)
             print(f"took {health_change} damage")
     visited_chunks[HEALTH_KEY] = current_health
     # if current_health <= 4:  # 2 hearts or less
