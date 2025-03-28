@@ -168,7 +168,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass
             
             # Send results back
             result_queue.put((env_id, action, next_obs, done, custom_reward, info))
-            if env_id == 0:
+            if env_id == 0 or env_id == 1:
                 env.render()
             # Reset if episode is done
             if done:
