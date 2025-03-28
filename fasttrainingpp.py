@@ -892,13 +892,32 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
     # Apply gradients
     scaler.unscale_(optimizer)
 
+    # total_norm = 0.0
+    # for p in agent.policy.parameters():
+    #     if p.grad is not None:
+    #         param_norm = p.grad.data.norm(2)
+    #         total_norm += param_norm.item() ** 2
+    # total_norm = total_norm ** 0.5
+    # Replace your current gradient norm calculation with this:
     total_norm = 0.0
-    for p in agent.policy.parameters():
+    value_head_norm = 0.0
+    policy_head_norm = 0.0
+
+    for name, p in agent.policy.named_parameters():
         if p.grad is not None:
             param_norm = p.grad.data.norm(2)
             total_norm += param_norm.item() ** 2
-    total_norm = total_norm ** 0.5
+            
+            # Track component-specific norms
+            if "value" in name:
+                value_head_norm += param_norm.item() ** 2
+            elif "pi_head" in name:
+                policy_head_norm += param_norm.item() ** 2
 
+    total_norm = total_norm ** 0.5
+    value_head_norm = value_head_norm ** 0.5
+    policy_head_norm = policy_head_norm ** 0.5
+    print(f"[Policy Update] Grad norms: Total={total_norm:.2f}, Value={value_head_norm:.2f}, Policy={policy_head_norm:.2f}")
     th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
     scaler.step(optimizer)
     scaler.update()
@@ -932,7 +951,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     """
     # Hyperparameters
     LEARNING_RATE = 1.2e-5
-    MAX_GRAD_NORM = 1.0
+    MAX_GRAD_NORM = 10.0
     # LAMBDA_KL = 0.2
     #march 26 mod
     #LAMBDA_KL =  0.13
