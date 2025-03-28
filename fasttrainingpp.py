@@ -18,12 +18,13 @@ from agent_mod import PI_HEAD_KWARGS, MineRLAgent, ENV_KWARGS
 from data_loader import DataLoader
 from lib.tree_util import tree_map
 
-#from lib.phase1 import reward_function
+# from lib.phase1 import reward_function
 from lib.reward_structure_mod import custom_reward_function
 from lib.policy_mod import compute_kl_loss
 from torchvision import transforms
-#from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
+# from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival
 from torch.cuda.amp import autocast, GradScaler
+
 
 class SimpleDebugLogger:
     def __init__(self, log_dir="debug_logs"):
@@ -64,8 +65,11 @@ class SimpleDebugLogger:
         """Close log files"""
         self.log_file.close()
         self.episode_file.close()
-#global logger
+
+
+# Global logger
 debug_logger = SimpleDebugLogger()
+
 
 def load_model_parameters(path_to_model_file):
     agent_parameters = pickle.load(open(path_to_model_file, "rb"))
@@ -124,6 +128,10 @@ class PhaseCoordinator:
 
 
 def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass):
+    """
+    Worker process for environment stepping. Receives actions on an action_queue,
+    steps the environment, sends observations and rewards on result_queue.
+    """
     # Create environment
     env = HumanSurvivalClass(**ENV_KWARGS).make()
     
@@ -151,7 +159,7 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass
             step_start = time.time()
             next_obs, env_reward, done, info = env.step(action)
             step_time = time.time() - step_start
-            #print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
+            # print(f"[ENV WORKER {env_id}] Environment step took {step_time:.3f}s (raw)")
             step_count += 1
             
             # Calculate custom reward
@@ -162,8 +170,13 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass
             # Apply death penalty if done
             if done:
                 custom_reward -= 30.0
-            custom_reward/=4
+            
+            # Divide or scale rewards (if needed)
+            custom_reward /= 4
+            
+            # For debugging, we just zero out final reward
             custom_reward = 0
+            
             # Increment step count
             episode_step_count += 1
             
@@ -192,9 +205,12 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass
     print(f"[Env {env_id}] Stopped")
 
 
-# Thread for coordinating environments and collecting rollouts
 def environment_thread(agent, rollout_steps, action_queues, result_queue, rollout_queue, 
                        out_episodes, stop_flag, num_envs, phase_coordinator):
+    """
+    A thread that handles environment interactions (through the worker processes),
+    collecting rollouts for training.
+    """
     # Initialize tracking variables
     obs_list = [None] * num_envs
     episode_total_rewards = [0.0] * num_envs
@@ -238,7 +254,6 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         # Start all environments processing at once
         for env_id in range(num_envs):
             if obs_list[env_id] is not None:
-                # Generate action using agent
                 with th.no_grad():
                     action_info = agent.get_action_and_training_info(
                         minerl_obs=obs_list[env_id],
@@ -247,11 +262,11 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                         taken_action=None
                     )
                     
-                    # Extract new hidden state (last element of return tuple)
+                    # The returned tuple is something like:
+                    # (minerl_action, pi_dist, vpred, [aux_vpred], log_prob, new_hidden_state)
                     minerl_action = action_info[0]
                     new_hid = action_info[-1]
                 
-                # Update hidden state
                 hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                 
                 # Send action to environment
@@ -276,11 +291,9 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                 if action is None and done and next_obs is None:
                     # This is an episode completion notification
                     episode_length = reward  # Using reward field to pass episode length
-                    # Log episode with total accumulated reward
                     with open(out_episodes, "a") as f:
                         f.write(f"{episode_length}\t{episode_total_rewards[env_id]}\n")
                     debug_logger.log_episode(env_id, episode_length, episode_total_rewards[env_id])
-                    # Reset the reward counter
                     episode_total_rewards[env_id] = 0.0
                     continue
                 
@@ -300,21 +313,19 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                     )
                     rollouts[env_id]["next_obs"].append(next_obs)
                     episode_total_rewards[env_id] += reward
-                    # Update state
+                    
                     obs_list[env_id] = next_obs
                     
                     # Reset hidden state if done
                     if done:
                         hidden_states[env_id] = agent.policy.initial_state(batch_size=1)
                     
-                    # Mark environment as processed
                     env_waiting_for_result[env_id] = False
                     env_step_counts[env_id] += 1
                     total_transitions += 1
                     
                     # If this environment needs more steps, immediately send next action
                     if env_step_counts[env_id] < rollout_steps:
-                        # Generate next action
                         with th.no_grad():
                             action_info = agent.get_action_and_training_info(
                                 minerl_obs=obs_list[env_id],
@@ -323,14 +334,11 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
                                 taken_action=None
                             )
                             
-                            # Extract new hidden state (last element of return tuple)
                             minerl_action = action_info[0]
                             new_hid = action_info[-1]
                         
-                        # Update hidden state
                         hidden_states[env_id] = tree_map(lambda x: x.detach(), new_hid)
                         
-                        # Send action to environment
                         action_queues[env_id].put(minerl_action)
                         env_waiting_for_result[env_id] = True
             except queue.Empty:
@@ -338,30 +346,24 @@ def environment_thread(agent, rollout_steps, action_queues, result_queue, rollou
         
         # Check if we're in auxiliary phase again before putting rollouts in queue
         if not phase_coordinator.in_auxiliary_phase():
-            # Send collected rollouts to training thread
             end_time = time.time()
             duration = end_time - start_time
             
-            # Count total transitions
             actual_transitions = sum(len(r["obs"]) for r in rollouts)
             
             rollout_queue.put(rollouts)
             
             print(f"[Environment Thread] Iteration {iteration} collected {actual_transitions} transitions "
-                f"across {num_envs} envs in {duration:.3f}s")
+                  f"across {num_envs} envs in {duration:.3f}s")
         else:
-            # Buffer the rollouts for later use
+            # Buffer the rollouts for later
             phase_coordinator.buffer_rollout(rollouts)
             print(f"[Environment Thread] Iteration {iteration} - buffering {sum(len(r['obs']) for r in rollouts)} transitions")
 
 
-# Process rollouts from a single environment
 def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     """
-    Process a rollout from a single environment into a series of transitions
-    with policy distributions, values, advantages, and returns.
-    
-    Handles both cases where auxiliary value head is present or not.
+    Convert a single environment's rollout into transitions with advantage, return, etc.
     """
     transitions = []
     T = len(rollout["obs"])
@@ -372,7 +374,7 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
     act_seq = rollout["actions"]
     hidden_states_seq = rollout["hidden_states"]
 
-    # Get sequence data from current agent policy
+    # Ask agent for entire sequence distribution
     agent_outputs = agent.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=hidden_states_seq[0],
@@ -380,36 +382,32 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         taken_actions_list=act_seq
     )
     
-    # Handle outputs flexibly based on what's returned
-    if len(agent_outputs) == 5:  # With auxiliary value head
+    # Distinguish if we have an auxiliary value head or not
+    if len(agent_outputs) == 5:
         pi_dist_seq, vpred_seq, aux_vpred_seq, log_prob_seq, final_hid = agent_outputs
         has_aux_head = True
-    else:  # Without auxiliary value head
+    else:
         pi_dist_seq, vpred_seq, log_prob_seq, final_hid = agent_outputs
         aux_vpred_seq = None
         has_aux_head = False
     
-    # Get sequence data from pretrained policy (for KL divergence)
+    # Ask pretrained policy for old distribution (for KL)
     old_outputs = pretrained_policy.get_sequence_and_training_info(
         minerl_obs_list=obs_seq,
         initial_hidden_state=pretrained_policy.policy.initial_state(1),
         stochastic=False,
         taken_actions_list=act_seq
     )
-    
-    # Handle outputs from pretrained policy
-    if len(old_outputs) == 5:  # With auxiliary value head
+    if len(old_outputs) == 5:
         old_pi_dist_seq, old_vpred_seq, _, old_log_prob_seq, _ = old_outputs
-    else:  # Without auxiliary value head
+    else:
         old_pi_dist_seq, old_vpred_seq, old_log_prob_seq, _ = old_outputs
 
-    # Create transition for each timestep
+    # Build transitions
     for t in range(T):
-        # Extract policy distributions for this timestep
         cur_pd_t = {k: v[t] for k, v in pi_dist_seq.items()}
         old_pd_t = {k: v[t] for k, v in old_pi_dist_seq.items()}
         
-        # Create transition data
         transition = {
             "obs": rollout["obs"][t],
             "action": rollout["actions"][t],
@@ -421,33 +419,28 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
             "old_pd": old_pd_t,
             "next_obs": rollout["next_obs"][t]
         }
-        
-        # Add auxiliary value prediction if available
         if has_aux_head and aux_vpred_seq is not None:
             transition["aux_v_pred"] = aux_vpred_seq[t]
-            
+        
         transitions.append(transition)
 
-    # Bootstrap value calculation for GAE
+    # Bootstrap
     bootstrap_value = 0.0
     if not transitions[-1]["done"]:
         with th.no_grad():
             hid_t_cpu = rollout["hidden_states"][-1]
             hid_t = tree_map(lambda x: x.to("cuda").contiguous(), hid_t_cpu)
-            
-            # Get action and training info for bootstrap value
             action_outputs = agent.get_action_and_training_info(
                 minerl_obs=transitions[-1]["next_obs"],
                 hidden_state=hid_t,
                 stochastic=False,
                 taken_action=None
             )
-            
-            # Value is at index 2 regardless of aux head (they return different length tuples)
+            # Value is at index 2 if we have an aux head
             vpred_index = 2
             bootstrap_value = action_outputs[vpred_index].item()
     
-    # GAE calculation
+    # GAE
     gae = 0.0
     for i in reversed(range(T)):
         r_i = transitions[i]["reward"]
@@ -458,49 +451,41 @@ def train_unroll(agent, pretrained_policy, rollout, gamma=0.999, lam=0.95):
         delta = r_i + gamma * next_val * mask - v_i
         gae = delta + gamma * lam * mask * gae
         transitions[i]["advantage"] = gae
-        transitions[i]["return"] = gae + v_i  # Store returns for both value heads
-
+        transitions[i]["return"] = gae + v_i
+    
+    # DEBUG: Summaries of predictions
+    all_vpred = [t["v_pred"].item() for t in transitions]
+    all_ret = [t["return"] for t in transitions]
+    all_adv = [t["advantage"] for t in transitions]
+    print(f"  # DEBUG: train_unroll stats: vpred mean={np.mean(all_vpred):.3f}, "
+          f"return mean={np.mean(all_ret):.3f}, max adv={np.max(all_adv):.3f}, "
+          f"min adv={np.min(all_adv):.3f}, T={T}")
+    
     return transitions
 
 
-# Get recent rollouts for sleep phase
 def get_recent_rollouts(stored_rollouts, max_rollouts=5):
     """
-    Extract recent rollouts for the sleep phase, limiting the number to save memory.
-    
-    Args:
-        stored_rollouts: List of rollout batches (each batch contains rollouts from multiple envs)
-        max_rollouts: Maximum number of individual rollouts to return
-        
-    Returns:
-        List of individual rollouts (not batched by environment)
+    Used for PPG sleep phase, returning only the last few rollouts.
     """
     recent_rollouts = []
-    
-    # Process most recent rollout batches first
     for rollout_batch in reversed(stored_rollouts):
-        # Each batch contains rollouts from multiple environments
         for env_rollout in rollout_batch:
-            # Skip empty rollouts
             if len(env_rollout["obs"]) > 0:
                 recent_rollouts.append(env_rollout)
                 if len(recent_rollouts) >= max_rollouts:
                     break
-        
         if len(recent_rollouts) >= max_rollouts:
             break
-    
-    # Reverse to maintain chronological order
     recent_rollouts.reverse()
-    
     print(f"[Training Thread] Selected {len(recent_rollouts)} rollouts for sleep phase")
     return recent_rollouts
 
 
-# Run a PPG sleep phase
-# Run a PPG sleep phase
 def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0, beta_clone=1.0):
-    """Run the PPG auxiliary phase with proper memory cleanup between rollouts."""
+    """
+    The PPG "sleep" phase for training an auxiliary value head plus distillation.
+    """
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if not has_aux_head:
         print("[Sleep Phase] Warning: Agent does not have auxiliary value head, skipping sleep phase")
@@ -508,22 +493,18 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     
     print(f"[Sleep Phase] Running with {len(recent_rollouts)} rollouts")
     
-    # Track memory usage
+    # Debugging: track memory usage
     print(f"Initial CUDA memory: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     
-    # Maximum sequence length to process at once
     MAX_SEQ_LEN = 64
     BATCH_SIZE = 16
     
-    # First cycle: Process rollouts, compute auxiliary value loss, and store original distributions
     print("[Sleep Phase] Running cycle 1/2")
     aux_value_loss_sum = 0.0
     num_transitions = 0
     
-    # Create a list to store CPU-only transition data for cycle 2
     cycle2_data = []
     
-    # Process each rollout
     for rollout_idx, rollout in enumerate(recent_rollouts):
         if len(rollout["obs"]) == 0:
             continue
@@ -531,50 +512,40 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         print(f"[Sleep Phase] Processing rollout {rollout_idx+1}/{len(recent_rollouts)} in cycle 1/2")
         print(f"Before rollout {rollout_idx+1} processing: {th.cuda.memory_allocated() / 1e9:.2f} GB")
         
-        # Process rollout to get transitions with returns calculation
         transitions = train_unroll(agent, agent, rollout)
         if len(transitions) == 0:
             continue
         
-        # Create a CPU-only copy of essential data for cycle 2
         cpu_transitions = []
         for t in transitions:
-            # Create a minimal CPU-only copy with only what we need
             cpu_trans = {
-                "obs": t["obs"],  # Keep observation references
-                "action": t["action"],  # Keep action references
-                "return": t["return"],  # Scalar, so no GPU memory
+                "obs": t["obs"],
+                "action": t["action"],
+                "return": t["return"],
             }
             cpu_transitions.append(cpu_trans)
         
-        # Process in smaller chunks for original distributions
         orig_dist_count = 0
-        
-        # Get the initial hidden state for this rollout
         current_hidden = tree_map(lambda x: x.to("cuda").contiguous(), rollout["hidden_states"][0])
         
         for chunk_start in range(0, len(transitions), MAX_SEQ_LEN):
             chunk_end = min(chunk_start + MAX_SEQ_LEN, len(transitions))
             chunk = transitions[chunk_start:chunk_end]
             
-            # Get obs and actions for this chunk
             chunk_obs = [t["obs"] for t in chunk]
             chunk_actions = [t["action"] for t in chunk]
             
-            # Store original policy distributions on CPU
             with th.no_grad():
                 outputs = agent.get_sequence_and_training_info(
                     minerl_obs_list=chunk_obs,
-                    initial_hidden_state=current_hidden,  # Use current hidden state
+                    initial_hidden_state=current_hidden,
                     stochastic=False,
                     taken_actions_list=chunk_actions
                 )
                 
-                # Update hidden state for next chunk (assuming last element contains hidden state)
                 final_hidden = outputs[-1]
                 current_hidden = tree_map(lambda x: x.detach(), final_hidden)
                 
-                # Store distributions directly in CPU transitions
                 if len(outputs) >= 5:
                     pi_dist_seq = outputs[0]
                     for i, t in enumerate(chunk):
@@ -585,29 +556,20 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                             }
                             orig_dist_count += 1
                 
-                # Force release GPU memory
                 del outputs, pi_dist_seq, chunk_obs, chunk_actions
-            
-            # Force clear cache
             th.cuda.empty_cache()
         
-        # Auxiliary value head optimization for cycle 1
         for batch_start in range(0, len(transitions), BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, len(transitions))
             batch = transitions[batch_start:batch_end]
             
-            # Get returns and observations for this batch
             batch_returns = th.tensor([t["return"] for t in batch], device="cuda")
             batch_obs = [t["obs"] for t in batch]
             batch_actions = [t["action"] for t in batch]
             
-            # Zero gradients
-            optimizer.zero_grad(set_to_none=True)  # More memory efficient
+            optimizer.zero_grad(set_to_none=True)
             
-            # Forward pass with gradients
             with th.enable_grad():
-                # Note: We use initial_state here as we're not processing sequentially
-                # This is fine for optimizing the auxiliary value head
                 outputs = agent.get_sequence_and_training_info(
                     minerl_obs_list=batch_obs,
                     initial_hidden_state=agent.policy.initial_state(1),
@@ -615,7 +577,6 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                     taken_actions_list=batch_actions
                 )
                 
-                # Get auxiliary values
                 if len(outputs) >= 5:
                     _, _, aux_values, _, _ = outputs
                 else:
@@ -623,18 +584,15 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                     continue
             
             try:
-                # Compute auxiliary value loss
                 with th.autocast(device_type='cuda'):
                     aux_value_loss = ((aux_values - batch_returns) ** 2).mean()
                 
-                # Backward and optimize
                 scaler.scale(aux_value_loss).backward()
                 scaler.unscale_(optimizer)
                 th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
                 
-                # Update statistics
                 aux_value_loss_sum += aux_value_loss.item() * len(batch)
                 num_transitions += len(batch)
                 
@@ -642,32 +600,22 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                 print(f"[Sleep Phase] Error during cycle 1 optimization: {e}")
                 import traceback
                 traceback.print_exc()
-                # Reset gradients
                 optimizer.zero_grad(set_to_none=True)
             
-            # Force release GPU memory
             del batch_returns, batch_obs, batch_actions, outputs, aux_values
             if 'aux_value_loss' in locals() and isinstance(aux_value_loss, th.Tensor):
                 del aux_value_loss
             
-            # Force clear cache
             th.cuda.empty_cache()
         
-        # Store CPU-only transitions for cycle 2
         cycle2_data.extend(cpu_transitions)
         
-        # !!! CRITICAL MEMORY CLEANUP !!!
-        # Force complete GPU memory cleanup for this rollout
         del transitions, cpu_transitions
-        
-        # Force empty CUDA cache
         th.cuda.empty_cache()
         
         print(f"After rollout {rollout_idx+1} processing: {th.cuda.memory_allocated() / 1e9:.2f} GB")
         print(f"Stored {orig_dist_count} original distributions")
     
-    # Rest of the function remains unchanged...
-    # Report statistics for cycle 1
     if num_transitions > 0:
         avg_aux_value_loss = aux_value_loss_sum / num_transitions
         print(f"[Sleep Phase] Cycle 1/2 completed - "
@@ -677,35 +625,26 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     else:
         print(f"[Sleep Phase] Cycle 1/2 - No transitions processed")
     
-    # Second cycle remains the same as it doesn't rely on sequential processing
-    # for the KL divergence calculation...
-    
     print(f"Before cycle 2: {th.cuda.memory_allocated() / 1e9:.2f} GB")
     print(f"[Sleep Phase] Running cycle 2/2")
     
-    # Track metrics for cycle 2
     aux_value_loss_sum = 0.0
     policy_distill_loss_sum = 0.0
     num_transitions = 0
     
-    # Process CPU-only transitions in batches
     for batch_start in range(0, len(cycle2_data), BATCH_SIZE):
         batch_end = min(batch_start + BATCH_SIZE, len(cycle2_data))
         batch = cycle2_data[batch_start:batch_end]
         
-        # Skip empty batches or ones without original distributions
         if not batch or not all("orig_pi" in t for t in batch):
             continue
         
-        # Get returns and observations for this batch
         batch_returns = th.tensor([t["return"] for t in batch], device="cuda")
         batch_obs = [t["obs"] for t in batch]
         batch_actions = [t["action"] for t in batch]
         
-        # Zero gradients
         optimizer.zero_grad(set_to_none=True)
         
-        # Forward pass with gradients
         with th.enable_grad():
             outputs = agent.get_sequence_and_training_info(
                 minerl_obs_list=batch_obs,
@@ -714,7 +653,6 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                 taken_actions_list=batch_actions
             )
             
-            # Get auxiliary values and current policy distributions
             if len(outputs) >= 5:
                 curr_pi, _, aux_values, _, _ = outputs
             else:
@@ -722,25 +660,17 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                 continue
         
         try:
-            # Compute losses
             with th.autocast(device_type='cuda'):
-                # Auxiliary value loss
                 aux_value_loss = ((aux_values - batch_returns) ** 2).mean()
                 
-                # Policy distillation loss
                 policy_distill_losses = []
                 for i, t in enumerate(batch):
-                    # Get original distribution from CPU storage
                     orig_pi = {k: v.to("cuda") for k, v in t["orig_pi"].items()}
-                    
-                    # Get current distribution
                     curr_pi_i = {k: v[i] for k, v in curr_pi.items()}
                     
-                    # Compute KL divergence
                     kl_loss = compute_kl_loss(curr_pi_i, orig_pi)
                     policy_distill_losses.append(kl_loss)
                     
-                    # Force release GPU memory for original distribution
                     for k, v in orig_pi.items():
                         del v
                     del orig_pi
@@ -753,14 +683,12 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
                     loss = aux_value_loss
                     policy_distill_loss_val = 0.0
             
-            # Backward and optimize
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
             
-            # Update statistics
             aux_value_loss_sum += aux_value_loss.item() * len(batch)
             policy_distill_loss_sum += policy_distill_loss_val * len(batch)
             num_transitions += len(batch)
@@ -769,10 +697,8 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
             print(f"[Sleep Phase] Error during cycle 2 optimization: {e}")
             import traceback
             traceback.print_exc()
-            # Reset gradients
             optimizer.zero_grad(set_to_none=True)
         
-        # Force release GPU memory
         del batch_returns, batch_obs, batch_actions, outputs, curr_pi, aux_values
         if 'aux_value_loss' in locals() and isinstance(aux_value_loss, th.Tensor):
             del aux_value_loss
@@ -783,10 +709,8 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
         if 'loss' in locals() and isinstance(loss, th.Tensor):
             del loss
         
-        # Force clear cache
         th.cuda.empty_cache()
     
-    # Report statistics for cycle 2
     if num_transitions > 0:
         avg_aux_value_loss = aux_value_loss_sum / num_transitions
         avg_policy_distill_loss = policy_distill_loss_sum / num_transitions
@@ -797,45 +721,30 @@ def run_sleep_phase(agent, recent_rollouts, optimizer, scaler, max_grad_norm=1.0
     else:
         print(f"[Sleep Phase] Cycle 2/2 - No transitions processed")
     
-    # Final cleanup and memory usage reporting
     del cycle2_data
     th.cuda.empty_cache()
     print("[Sleep Phase] Completed")
 
-# Run policy optimization (wake phase)
-def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler, 
-                      value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0, gamma=0.995, lam=0.95):
+
+def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
+                      value_loss_coef=0.5, lambda_kl=0.2, max_grad_norm=1.0,
+                      gamma=0.995, lam=0.95):
     """
-    Run a PPO policy update (wake phase) on the provided rollouts.
-    
-    Args:
-        agent: The agent being trained
-        pretrained_policy: Reference policy for KL divergence
-        rollouts: List of rollouts to use for optimization
-        optimizer: The optimizer to use
-        scaler: Gradient scaler for mixed precision training
-        value_loss_coef: Coefficient for value function loss
-        lambda_kl: Coefficient for KL divergence loss
-        max_grad_norm: Maximum gradient norm for clipping
+    PPO-like policy update, computing policy loss, value loss, KL to the old policy.
     """
-    # Track statistics
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_kl_loss = 0.0
     num_valid_envs = 0
     total_transitions = 0
     
-    # Reset gradients
     optimizer.zero_grad()
     
-    # Process each environment's rollouts
     for env_idx, env_rollout in enumerate(rollouts):
-        # Skip empty rollouts
         if len(env_rollout["obs"]) == 0:
             print(f"[Policy Update] Environment {env_idx} has no transitions, skipping")
             continue
         
-        # Process rollout into transitions
         env_transitions = train_unroll(
             agent,
             pretrained_policy,
@@ -847,9 +756,15 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
         if len(env_transitions) == 0:
             continue
         
-        # Extract data for this environment
-        env_advantages = th.cat([th.tensor(t["advantage"], device="cuda").unsqueeze(0) 
-                                for t in env_transitions])
+        # DEBUG: print advantage stats for each environment
+        adv_list = [t["advantage"] for t in env_transitions]
+        print(f"  # DEBUG: Env {env_idx} advantage: mean={np.mean(adv_list):.3f}, "
+              f"max={np.max(adv_list):.3f}, min={np.min(adv_list):.3f}")
+        
+        env_advantages = th.cat([
+            th.tensor(t["advantage"], device="cuda").unsqueeze(0)
+            for t in env_transitions
+        ])
         env_returns = th.tensor([t["return"] for t in env_transitions], device="cuda")
         env_log_probs = th.cat([t["log_prob"].unsqueeze(0) for t in env_transitions])
         env_v_preds = th.cat([t["v_pred"].unsqueeze(0) for t in env_transitions])
@@ -857,79 +772,62 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
         # Normalize advantages
         env_advantages = (env_advantages - env_advantages.mean()) / (env_advantages.std() + 1e-8)
         
-        # Compute losses
         with autocast():
-            # Policy loss (Actor)
             policy_loss = -(env_advantages * env_log_probs).mean()
-            
-            # Value function loss (Critic)
             value_loss = ((env_v_preds - env_returns) ** 2).mean()
             
-            # KL divergence loss
             kl_losses = []
             for t in env_transitions:
                 kl_loss = compute_kl_loss(t["cur_pd"], t["old_pd"])
                 kl_losses.append(kl_loss)
             kl_loss = th.stack(kl_losses).mean()
             
-            # Total loss
             env_loss = policy_loss + (value_loss_coef * value_loss) + (lambda_kl * kl_loss)
         
-        # Backward pass
         scaler.scale(env_loss).backward()
         
-        # Update statistics
         total_policy_loss += policy_loss.item()
         total_value_loss += value_loss.item()
         total_kl_loss += kl_loss.item()
         num_valid_envs += 1
         total_transitions += len(env_transitions)
     
-    # Skip update if no valid transitions
     if num_valid_envs == 0:
         print("[Policy Update] No valid transitions, skipping update")
         return 0.0, 0.0, 0.0, 0
     
-    # Apply gradients
+    # DEBUG: measure pre-clip grad norm
     scaler.unscale_(optimizer)
-
-    # total_norm = 0.0
-    # for p in agent.policy.parameters():
-    #     if p.grad is not None:
-    #         param_norm = p.grad.data.norm(2)
-    #         total_norm += param_norm.item() ** 2
-    # total_norm = total_norm ** 0.5
-    # Replace your current gradient norm calculation with this:
-    total_norm = 0.0
-    value_head_norm = 0.0
-    policy_head_norm = 0.0
-
+    preclip_total_norm = 0.0
     for name, p in agent.policy.named_parameters():
         if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm += param_norm.item() ** 2
-            
-            # Track component-specific norms
-            if "value" in name:
-                value_head_norm += param_norm.item() ** 2
-            elif "pi_head" in name:
-                policy_head_norm += param_norm.item() ** 2
-
-    total_norm = total_norm ** 0.5
-    value_head_norm = value_head_norm ** 0.5
-    policy_head_norm = policy_head_norm ** 0.5
-    print(f"[Policy Update] Grad norms: Total={total_norm:.2f}, Value={value_head_norm:.2f}, Policy={policy_head_norm:.2f}")
+            preclip_total_norm += p.grad.data.norm(2).item() ** 2
+    preclip_total_norm = preclip_total_norm ** 0.5
+    print(f"[Policy Update DEBUG] Pre-clip grad norm = {preclip_total_norm:.2f}")
+    
+    # Clip
     th.nn.utils.clip_grad_norm_(agent.policy.parameters(), max_grad_norm)
+    
+    # DEBUG: measure post-clip grad norm
+    postclip_total_norm = 0.0
+    for name, p in agent.policy.named_parameters():
+        if p.grad is not None:
+            postclip_total_norm += p.grad.data.norm(2).item() ** 2
+    postclip_total_norm = postclip_total_norm ** 0.5
+    print(f"[Policy Update DEBUG] Post-clip grad norm = {postclip_total_norm:.2f}")
+    
     scaler.step(optimizer)
     scaler.update()
     
-    # Compute averages
     avg_policy_loss = total_policy_loss / num_valid_envs
     avg_value_loss = total_value_loss / num_valid_envs
     avg_kl_loss = total_kl_loss / num_valid_envs
     
+    # We'll use post-clip norm for final printing
+    total_norm = postclip_total_norm
+    
     debug_logger.log_update(
-        avg_policy_loss, 
+        avg_policy_loss,
         avg_value_loss,
         avg_kl_loss,
         total_transitions,
@@ -940,45 +838,31 @@ def run_policy_update(agent, pretrained_policy, rollouts, optimizer, scaler,
 
 def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iterations, phase_coordinator):
     """
-    Training thread that handles both policy gradient and auxiliary phases of PPG.
-    
-    Args:
-        agent: The agent being trained
-        pretrained_policy: Reference policy for KL divergence
-        rollout_queue: Queue for receiving rollouts from environment thread
-        stop_flag: Flag for signaling termination
-        num_iterations: Number of iterations to train for
-        phase_coordinator: Coordinator for synchronizing phases between threads
+    The main training loop. Processes rollouts, does policy updates, handles the PPG sleep phase if enabled, etc.
     """
     # Hyperparameters
     LEARNING_RATE = 1.2e-5
     MAX_GRAD_NORM = 10.0
-    # LAMBDA_KL = 0.2
-    #march 26 mod
-    #LAMBDA_KL =  0.13
-    LAMBDA_KL =  0.15
+    LAMBDA_KL = 0.15
     GAMMA = 0.995
     LAM = 0.95
     VALUE_LOSS_COEF = 1.8
     KL_DECAY = 0.9999
     
-    # PPG specific hyperparameters
-    PPG_ENABLED = False  # Enable/disable PPG
-    PPG_N_PI_UPDATES = 8  # Number of policy updates before auxiliary phase
-    PPG_BETA_CLONE = 1.0  # Weight for the policy distillation loss
+    # PPG specific
+    PPG_ENABLED = False
+    PPG_N_PI_UPDATES = 8
+    PPG_BETA_CLONE = 1.0
     
-    # Setup optimizer
     optimizer = th.optim.Adam(agent.policy.parameters(), lr=LEARNING_RATE)
     running_loss = 0.0
     total_steps = 0
     iteration = 0
     scaler = GradScaler()
     
-    # PPG tracking variables
     pi_update_counter = 0
     stored_rollouts = []
     
-    # Check if agent has auxiliary value head
     has_aux_head = hasattr(agent.policy, 'aux_value_head')
     if has_aux_head:
         print("[Training Thread] Detected auxiliary value head, enabling PPG")
@@ -989,21 +873,17 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     while iteration < num_iterations and not stop_flag[0]:
         iteration += 1
         
-        # Determine if we should run sleep phase
+        # Decide if we do an aux (sleep) phase
         do_aux_phase = (PPG_ENABLED and 
-                         has_aux_head and 
-                         pi_update_counter >= PPG_N_PI_UPDATES and 
-                         len(stored_rollouts) > 0)
+                        has_aux_head and 
+                        pi_update_counter >= PPG_N_PI_UPDATES and 
+                        len(stored_rollouts) > 0)
         
         if do_aux_phase:
-            # Signal start of auxiliary phase
             phase_coordinator.start_auxiliary_phase()
             print(f"[Training Thread] Starting PPG auxiliary phase (iteration {iteration})")
             
-            # Get recent rollouts for sleep phase
             recent_rollouts = get_recent_rollouts(stored_rollouts, max_rollouts=5)
-            
-            # Run sleep phase
             run_sleep_phase(
                 agent=agent,
                 recent_rollouts=recent_rollouts,
@@ -1013,48 +893,38 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 beta_clone=PPG_BETA_CLONE
             )
             
-            # End auxiliary phase
             phase_coordinator.end_auxiliary_phase()
             print("[Training Thread] Auxiliary phase complete")
             
-            # Process buffered rollouts
+            # Handle any rollouts that arrived mid-phase
             buffered_rollouts = phase_coordinator.get_buffered_rollouts()
             if buffered_rollouts:
                 print(f"[Training Thread] Processing {len(buffered_rollouts)} buffered rollouts")
-                for rollout in buffered_rollouts:
-                    rollout_queue.put(rollout)
+                for r in buffered_rollouts:
+                    rollout_queue.put(r)
             
-            # Reset tracking variables
             pi_update_counter = 0
             stored_rollouts = []
-            
-            # Clear CUDA cache
             th.cuda.empty_cache()
-            
         else:
-            # ===== POLICY PHASE =====
             pi_update_counter += 1
             
             print(f"[Training Thread] Policy phase {pi_update_counter}/{PPG_N_PI_UPDATES} - "
-                 f"Waiting for rollouts...")
+                  f"Waiting for rollouts...")
             
             wait_start = time.time()
             rollouts = rollout_queue.get()
             wait_duration = time.time() - wait_start
             print(f"[Training Thread] Waited {wait_duration:.3f}s for rollouts.")
             
-            # Store rollouts for PPG auxiliary phase if enabled
             if PPG_ENABLED and has_aux_head:
-                # Store rollouts for later use
                 stored_rollouts.append(rollouts)
-                # Limit stored rollouts to save memory
                 if len(stored_rollouts) > 2:
                     stored_rollouts = stored_rollouts[-2:]
             
             train_start = time.time()
             print(f"[Training Thread] Processing rollouts for iteration {iteration}")
             
-            # Run policy update
             avg_policy_loss, avg_value_loss, avg_kl_loss, num_transitions, grad_norm = run_policy_update(
                 agent=agent,
                 pretrained_policy=pretrained_policy,
@@ -1068,7 +938,6 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                 lam=LAM
             )
             
-            # Report statistics
             train_duration = time.time() - train_start
             
             print(f"[Training Thread] Policy Phase {pi_update_counter}/{PPG_N_PI_UPDATES} - "
@@ -1076,11 +945,11 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
                   f"PolicyLoss: {avg_policy_loss:.4f}, ValueLoss: {avg_value_loss:.4f}, "
                   f"KLLoss: {avg_kl_loss:.4f}, GradNorm: {grad_norm:.4f}")
             
-            # Update running stats
             running_loss += (avg_policy_loss + avg_value_loss + avg_kl_loss) * num_transitions
             total_steps += num_transitions
-            avg_loss = running_loss / total_steps if total_steps > 0 else 0.0
             LAMBDA_KL *= KL_DECAY
+
+
 def train_rl_mp(
     in_model,
     in_weights,
@@ -1093,46 +962,54 @@ def train_rl_mp(
     use_night_bias=False
 ):
     """
-    Multiprocessing version with separate processes for environment stepping
+    Main entry point for multiprocessing training. Spawns environment worker processes
+    and the environment_thread, plus a training_thread, then waits for them to finish.
     """
-    # Set spawn method for multiprocessing
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         print("Multiprocessing start method already set")
     
-    # Create dummy environment for agent initialization
+    # Select environment type
     if use_night_bias:
-        # Import night-biased version
         print("Using night-biased environment")
         from minerl.herobraine.env_specs.human_survival_specs_night import HumanSurvival as HumanSurvivalClass
     else:
-        # Import regular version
         print("Using standard environment")
         from minerl.herobraine.env_specs.human_survival_specs import HumanSurvival as HumanSurvivalClass
+    
+    # Create dummy environment for agent initialization
     dummy_env = HumanSurvivalClass(**ENV_KWARGS).make()
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
     
-    # Create agent for main thread
+    # DEBUG: load in_weights and print missing/unexpected keys
+    debug_weights = th.load(in_weights, map_location="cpu")
+    print("[DEBUG] Loaded raw weights keys (showing up to 10):", list(debug_weights.keys())[:10], "...")
+    
+    # Create agent
     agent = MineRLAgent(
         dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
         pi_head_kwargs=agent_pi_head_kwargs
     )
-    agent.load_weights(in_weights)
+    load_result = agent.policy.load_state_dict(debug_weights, strict=False)
+    print("[DEBUG] Missing keys:", load_result.missing_keys)
+    print("[DEBUG] Unexpected keys:", load_result.unexpected_keys)
+    agent.reset()
     
-    # Create pretrained policy for KL divergence
+    # Create pretrained policy
     pretrained_policy = MineRLAgent(
         dummy_env, device="cuda",
         policy_kwargs=agent_policy_kwargs,
         pi_head_kwargs=agent_pi_head_kwargs
     )
-    pretrained_policy.load_weights(in_weights)
+    load_result2 = pretrained_policy.policy.load_state_dict(debug_weights, strict=False)
+    print("[DEBUG] (Pretrained) Missing keys:", load_result2.missing_keys)
+    print("[DEBUG] (Pretrained) Unexpected keys:", load_result2.unexpected_keys)
+    pretrained_policy.reset()
     
-    # Create phase coordinator
     phase_coordinator = PhaseCoordinator()
     
-    # Create multiprocessing shared objects
     stop_flag = mp.Value('b', False)
     action_queues = [Queue() for _ in range(num_envs)]
     result_queue = Queue()
@@ -1150,34 +1027,31 @@ def train_rl_mp(
         workers.append(p)
         time.sleep(0.4)
     
-    # Thread stop flag (for clean shutdown)
     thread_stop = [False]
-    
-    # Create and start threads
     env_thread = threading.Thread(
         target=environment_thread,
         args=(
-            agent, 
-            rollout_steps, 
-            action_queues, 
-            result_queue, 
-            rollout_queue, 
-            out_episodes, 
+            agent,
+            rollout_steps,
+            action_queues,
+            result_queue,
+            rollout_queue,
+            out_episodes,
             thread_stop,
             num_envs,
-            phase_coordinator  # Add phase coordinator
+            phase_coordinator
         )
     )
     
     train_thread = threading.Thread(
         target=training_thread,
         args=(
-            agent, 
-            pretrained_policy, 
-            rollout_queue, 
-            thread_stop, 
+            agent,
+            pretrained_policy,
+            rollout_queue,
+            thread_stop,
             num_iterations,
-            phase_coordinator  # Add phase coordinator
+            phase_coordinator
         )
     )
     
@@ -1186,41 +1060,34 @@ def train_rl_mp(
     train_thread.start()
     
     try:
-        # Wait for training thread to complete
         train_thread.join()
     except KeyboardInterrupt:
         print("Interrupted by user, stopping threads and processes...")
     finally:
-        # Signal threads and processes to stop
         print("Setting stop flag...")
         thread_stop[0] = True
         stop_flag.value = True
         
-        # Signal all workers to exit
         for q in action_queues:
             try:
-                q.put(None)  # Signal to exit
+                q.put(None)
             except:
                 pass
         
-        # Wait for threads to finish
         print("Waiting for threads to finish...")
-        env_thread.join(timeout=10) #Might need to change timeout values
+        env_thread.join(timeout=10)
         train_thread.join(timeout=5)
         
-        # Wait for workers to finish
         print("Waiting for worker processes to finish...")
         for i, p in enumerate(workers):
-            p.join(timeout=5) # Might need to change this
+            p.join(timeout=5)
             if p.is_alive():
                 print(f"Worker {i} did not terminate, force killing...")
                 p.terminate()
         
-        # Close dummy environment
         dummy_env.close()
         
         debug_logger.close()
-        # Save weights
         print(f"Saving weights to {out_weights}")
         th.save(agent.policy.state_dict(), out_weights)
 
@@ -1241,9 +1108,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    # Check for auxiliary value head in weights
-    weights = th.load(args.in_weights, map_location="cpu")
-    has_aux_head = any('aux' in key for key in weights.keys())
+    # Quick check for aux-value keys in the file
+    weights_test = th.load(args.in_weights, map_location="cpu")
+    has_aux_head = any('aux' in k for k in weights_test.keys())
     print(f"Model weights {'have' if has_aux_head else 'do not have'} auxiliary value head keys")
 
     train_rl_mp(
