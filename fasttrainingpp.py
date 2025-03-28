@@ -939,8 +939,8 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     LAMBDA_KL =  0.105
     GAMMA = 0.995
     LAM = 0.95
-    VALUE_LOSS_COEF = 1.3
-    KL_DECAY = 0.9996
+    VALUE_LOSS_COEF = 1.8
+    KL_DECAY = 0.9999
     
     # PPG specific hyperparameters
     PPG_ENABLED = False  # Enable/disable PPG
