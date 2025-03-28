@@ -1434,9 +1434,6 @@ def env_worker(env_id, action_queue, result_queue, stop_flag, HumanSurvivalClass
             # Divide or scale rewards (if needed)
             custom_reward /= 4
             
-            # For debugging, we just zero out final reward
-            custom_reward = 0
-            
             # Increment step count
             episode_step_count += 1
             
