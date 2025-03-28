@@ -63,7 +63,7 @@ def custom_reward_function(obs, done, info, visited_chunks):
     if chunk_key not in visited_chunks:
         visited_chunks[chunk_key] = True
         if len(visited_chunks)>3:
-            reward += 2  # Reward for exploring new chunks
+            reward += 1  # Reward for exploring new chunks
         print("visited new chunk!")
 
     # Exploration reward: New depths
