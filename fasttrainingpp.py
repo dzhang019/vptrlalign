@@ -936,7 +936,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     # LAMBDA_KL = 0.2
     #march 26 mod
     #LAMBDA_KL =  0.13
-    LAMBDA_KL =  0.15
+    LAMBDA_KL =  0.105
     GAMMA = 0.995
     LAM = 0.95
     VALUE_LOSS_COEF = 1.3
