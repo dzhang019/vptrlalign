@@ -787,7 +787,7 @@ def training_thread(agent, pretrained_policy, rollout_queue, stop_flag, num_iter
     GAMMA = 0.995
     LAM = 0.95
     VALUE_LOSS_COEF = 0.8  # Example: lowered from 1.8 to 0.8
-    KL_DECAY = 0.9999
+    KL_DECAY = 0.9996
     
     PPG_ENABLED = False
     PPG_N_PI_UPDATES = 8
@@ -885,6 +885,7 @@ def train_rl_mp(
     in_weights,
     out_weights,
     out_episodes,
+    baseline_weights=None,
     num_iterations=10,
     rollout_steps=40,
     num_envs=2,
@@ -908,6 +909,13 @@ def train_rl_mp(
     
     debug_weights = th.load(in_weights, map_location="cpu")
     print("[DEBUG] Loaded raw weights keys (showing up to 10):", list(debug_weights.keys())[:10], "...")
+
+    if baseline_weights is None:
+        baseline_weights = in_weights
+        print("[INFO] Using training weights as baseline weights")
+    
+    baseline_weights_dict = th.load(baseline_weights, map_location="cpu")
+    print("[DEBUG] Loaded baseline weights keys (showing up to 10):", list(baseline_weights_dict.keys())[:10], "...")
     
     agent = MineRLAgent(
         dummy_env, device="cuda",
@@ -924,9 +932,9 @@ def train_rl_mp(
         policy_kwargs=agent_policy_kwargs,
         pi_head_kwargs=agent_pi_head_kwargs
     )
-    load_result2 = pretrained_policy.policy.load_state_dict(debug_weights, strict=False)
-    print("[DEBUG] (Pretrained) Missing keys:", load_result2.missing_keys)
-    print("[DEBUG] (Pretrained) Unexpected keys:", load_result2.unexpected_keys)
+    load_result2 = pretrained_policy.policy.load_state_dict(baseline_weights_dict, strict=False)
+    print("[DEBUG] (Baseline) Missing keys:", load_result2.missing_keys)
+    print("[DEBUG] (Baseline) Unexpected keys:", load_result2.unexpected_keys)
     pretrained_policy.reset()
     
     phase_coordinator = PhaseCoordinator()
@@ -1016,6 +1024,8 @@ if __name__ == "__main__":
     parser.add_argument("--in-model", required=True, type=str)
     parser.add_argument("--in-weights", required=True, type=str)
     parser.add_argument("--out-weights", required=True, type=str)
+    parser.add_argument("--baseline-weights", required=False, type=str, 
+                    help="Baseline weights for KL divergence (defaults to --in-weights if not specified)")
     parser.add_argument("--out-episodes", required=False, type=str, default="episode_lengths.txt")
     parser.add_argument("--num-iterations", required=False, type=int, default=10)
     parser.add_argument("--rollout-steps", required=False, type=int, default=40)
