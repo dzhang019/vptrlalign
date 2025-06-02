@@ -18,22 +18,69 @@ from lib.util import FanInInitReLULayer, ResidualRecurrentBlocks
 from lib.misc import transpose
 
 #standalone global kl_loss function
-def compute_kl_loss(current_logits_dict, old_logits_dict):
+def compute_kl_loss(current_logits_dict, old_logits_dict, T=2.0):
     kl_total = 0.0
     num_heads = 0
     for key in current_logits_dict.keys():
         current_logits = current_logits_dict[key]
         pretrained_logits = old_logits_dict[key]
-        #print(f"compute_kl_loss: current_logits_dict[{key}].requires_grad: {current_logits.requires_grad}")
-        #print(f"compute_kl_loss: old_logits_dict[{key}].requires_grad: {pretrained_logits.requires_grad}")
+        # Scale the logits by T and then multiply the loss by T^2.
+        kl_loss = F.kl_div(
+            F.log_softmax(current_logits / T, dim=-1),
+            F.softmax(pretrained_logits / T, dim=-1),
+            reduction='batchmean'
+        ) * (T * T)
+        kl_total += kl_loss
+        num_heads += 1
+    return kl_total / num_heads
+
+def compute_kl_loss_debug(current_logits_dict, old_logits_dict, debug_tag=""):
+    kl_total = 0.0
+    num_heads = 0
+    head_kls = {}
+    
+    print(f"[KL-DEBUG {debug_tag}] Keys in current_logits_dict: {list(current_logits_dict.keys())}")
+    
+    for key in current_logits_dict.keys():
+        current_logits = current_logits_dict[key]
+        pretrained_logits = old_logits_dict[key]
+        
+        # Extract and print some sample logits for debugging
+        if current_logits.shape[0] > 0 and current_logits.ndimension() > 1:
+            print(f"[KL-DEBUG {debug_tag}] Key: {key}")
+            if key == "camera":  # Special handling for camera due to different shape
+                cur_sample = current_logits[0, :5].detach().cpu().numpy()
+                old_sample = pretrained_logits[0, :5].detach().cpu().numpy()
+            else:
+                cur_sample = current_logits[0, :5].detach().cpu().numpy()
+                old_sample = pretrained_logits[0, :5].detach().cpu().numpy()
+                
+            print(f"[KL-DEBUG {debug_tag}] Current sample: {cur_sample}")
+            print(f"[KL-DEBUG {debug_tag}] Old sample: {old_sample}")
+            print(f"[KL-DEBUG {debug_tag}] Diff: {cur_sample - old_sample}")
+            print(f"[KL-DEBUG {debug_tag}] Max abs diff: {np.abs(cur_sample - old_sample).max()}")
+        
+        # Check for very similar distributions
+        if th.allclose(current_logits, pretrained_logits, rtol=1e-4, atol=1e-4):
+            print(f"[KL-DEBUG {debug_tag}] Warning: Current and old logits for {key} are very similar!")
+        
+        # Calculate KL divergence - using your exact implementation
         kl_loss = F.kl_div(
             F.log_softmax(current_logits, dim=-1),
             F.softmax(pretrained_logits, dim=-1),
             reduction='batchmean'
         )
+        
+        head_kls[key] = kl_loss.item()
         kl_total += kl_loss
-        num_heads +=1
-    return kl_total / num_heads
+        num_heads += 1
+    
+    avg_kl = kl_total / max(1, num_heads)
+    
+    print(f"[KL-DEBUG {debug_tag}] KL per head: {head_kls}")
+    print(f"[KL-DEBUG {debug_tag}] Average KL: {avg_kl.item()}")
+    
+    return kl_total / max(1, num_heads)
 
 class ImgPreprocessing(nn.Module):
     """Normalize incoming images.
@@ -261,7 +308,12 @@ class MinecraftAgentPolicy(nn.Module):
 
         self.action_space = action_space
 
+        # Primary value head (for policy optimization)
         self.value_head = self.make_value_head(self.net.output_latent_size())
+        
+        # Auxiliary value head (for PPG auxiliary phase)
+        self.aux_value_head = self.make_value_head(self.net.output_latent_size())
+        
         self.pi_head = self.make_action_head(self.net.output_latent_size(), **pi_head_kwargs)
 
     def make_value_head(self, v_out_size: int, norm_type: str = "ewma", norm_kwargs: Optional[Dict] = None):
@@ -278,8 +330,10 @@ class MinecraftAgentPolicy(nn.Module):
         self.net.reset_parameters()
         self.pi_head.reset_parameters()
         self.value_head.reset_parameters()
+        self.aux_value_head.reset_parameters()
 
     def forward(self, obs, first: th.Tensor, state_in):
+        """Forward pass through the network, producing policy logits and value predictions"""
         if isinstance(obs, dict):
             # We don't want to mutate the obs input.
             obs = obs.copy()
@@ -291,12 +345,15 @@ class MinecraftAgentPolicy(nn.Module):
         else:
             mask = None
 
+        # Forward pass through the shared network
         (pi_h, v_h), state_out = self.net(obs, state_in, context={"first": first})
 
+        # Get policy logits and value predictions
         pi_logits = self.pi_head(pi_h, mask=mask)
         vpred = self.value_head(v_h)
+        aux_vpred = self.aux_value_head(v_h)  # Auxiliary value prediction
 
-        return (pi_logits, vpred, None), state_out
+        return (pi_logits, vpred, aux_vpred), state_out
 
     def get_logprob_of_action(self, pd, action):
         """
@@ -324,24 +381,30 @@ class MinecraftAgentPolicy(nn.Module):
         Returns:
           - probability distribution given observation
           - value prediction for given observation
+          - auxiliary value prediction for given observation
           - new state
         """
         # We need to add a fictitious time dimension everywhere
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+        (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
 
-        return pd, self.value_head.denormalize(vpred)[:, 0], state_out
+        return (
+            pd,
+            self.value_head.denormalize(vpred)[:, 0],
+            self.aux_value_head.denormalize(aux_vpred)[:, 0],
+            state_out
+        )
     
-
     @th.no_grad()
     def act(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
+        """Inference mode action selection"""
         # We need to add a fictitious time dimension everywhere
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+        (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
 
         if taken_action is None:
             ac = self.pi_head.sample(pd, deterministic=not stochastic)
@@ -351,29 +414,11 @@ class MinecraftAgentPolicy(nn.Module):
         assert not th.isnan(log_prob).any()
 
         # After unsqueezing, squeeze back to remove fictitious time dimension
-        result = {"log_prob": log_prob[:, 0], "vpred": self.value_head.denormalize(vpred)[:, 0]}
-        if return_pd:
-            result["pd"] = tree_map(lambda x: x[:, 0], pd)
-        ac = tree_map(lambda x: x[:, 0], ac)
-
-        return ac, state_out, result
-    
-    def act_train_old(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
-        # We need to add a fictitious time dimension everywhere
-        obs = tree_map(lambda x: x.unsqueeze(1), obs)
-        first = first.unsqueeze(1)
-
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
-
-        if taken_action is None:
-            ac = self.pi_head.sample(pd, deterministic=not stochastic)
-        else:
-            ac = tree_map(lambda x: x.unsqueeze(1), taken_action)
-        log_prob = self.pi_head.logprob(ac, pd)
-        assert not th.isnan(log_prob).any()
-
-        # After unsqueezing, squeeze back to remove fictitious time dimension
-        result = {"log_prob": log_prob[:, 0], "vpred": self.value_head.denormalize(vpred)[:, 0]}
+        result = {
+            "log_prob": log_prob[:, 0], 
+            "vpred": self.value_head.denormalize(vpred)[:, 0],
+            "aux_vpred": self.aux_value_head.denormalize(aux_vpred)[:, 0]
+        }
         if return_pd:
             result["pd"] = tree_map(lambda x: x[:, 0], pd)
         ac = tree_map(lambda x: x[:, 0], ac)
@@ -385,86 +430,98 @@ class MinecraftAgentPolicy(nn.Module):
         Single-step forward pass for a recurrent policy in 'train' mode.
         If 'taken_action' is None, we sample an action from the distribution.
         Otherwise, we compute log-prob of that forced 'taken_action'.
-        The partial indexing ([:, 0]) is now followed by .clone() to avoid in-place versioning errors.
+        
+        Returns action, state, and a dict with log_prob, vpred, aux_vpred, and optionally pd.
         """
-
-        # 1) Add a fictitious time dimension
+        # Add fictitious time dimension
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        # 2) Forward pass
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+        # Forward pass
+        (pd, vpred, aux_vpred), state_out = self(obs=obs, first=first, state_in=state_in)
 
-
-        # 3) Choose action: either sample or use forced `taken_action`
+        # Choose action (sample or forced)
         if taken_action is None:
             ac = self.pi_head.sample(pd, deterministic=not stochastic)
         else:
             ac = tree_map(lambda x: x.unsqueeze(1), taken_action)
 
-        # 4) log_prob
-        log_prob_2d = self.pi_head.logprob(ac, pd)          # shape [B, T=1]
-        # We slice out dimension 1, but must .clone() to avoid in-place modifications
+        # Calculate log probability
+        log_prob_2d = self.pi_head.logprob(ac, pd)
         log_prob_1d = log_prob_2d[:, 0].clone()
 
-        # 5) Value
-        vpred_2d = self.value_head.denormalize(vpred)       # shape [B, T=1]
-        vpred_1d = vpred_2d[:, 0].clone()
+        # Denormalize value predictions
+        vpred_1d = self.value_head.denormalize(vpred)[:, 0].clone()
+        aux_vpred_1d = self.aux_value_head.denormalize(aux_vpred)[:, 0].clone()
 
-        # 6) Optionally return the distribution
-        result = {"log_prob": log_prob_1d, "vpred": vpred_1d}
+        # Prepare result
+        result = {
+            "log_prob": log_prob_1d,
+            "vpred": vpred_1d,
+            "aux_vpred": aux_vpred_1d
+        }
+        
+        # Optionally include policy distribution
         if return_pd:
-            # We also .clone() each slice from `pd`
             result["pd"] = tree_map(lambda x: x[:, 0].clone(), pd)
 
-        # 7) Squeeze out the time dimension for the final action
+        # Remove time dimension from action
         ac = tree_map(lambda x: x[:, 0], ac)
 
         return ac, state_out, result
+
     def act_train_sequence(self, obs_sequence, hidden_state, forced_actions=None, stochastic=True):
-        seq_img = obs_sequence["img"].unsqueeze(0)  # [1, T, C, H, W]
-        T = seq_img.shape[1]
-        first_mask = th.zeros(T, dtype=th.bool, device=seq_img.device)
+        """
+        Process a whole sequence of observations at once.
+        Returns policy distributions, value predictions, auxiliary value predictions,
+        log probabilities, and final hidden state.
+        """
+        # Get batch size from observation
+        batch_size = 1  # Single sequence case
+        
+        # Get sequence length
+        seq_len = obs_sequence["img"].shape[0]  # [T, C, H, W]
+        
+        # Create first mask (only first timestep is "first")
+        first_mask = th.zeros(seq_len, dtype=th.bool, device=obs_sequence["img"].device)
         first_mask[0] = True
         first_mask = first_mask.unsqueeze(0)  # [1, T]
-
-        (pd_seq, vpred_seq, _), state_out = self(
-            obs={"img": seq_img},
+        
+        # Add batch dimension to observations
+        batched_obs = {"img": obs_sequence["img"].unsqueeze(0)}  # [1, T, C, H, W]
+        
+        # Forward pass through policy
+        (pd_seq, vpred_seq, aux_vpred_seq), state_out = self(
+            obs=batched_obs,
             first=first_mask,
             state_in=hidden_state
         )
-
-        log_prob_seq = []
+        
+        # Calculate log probabilities if forced actions provided
+        log_prob_seq = None
         if forced_actions is not None:
-            # Stack actions to [1, T, ...] for batch processing
-            buttons = th.stack([fa["buttons"] for fa in forced_actions], dim=1)  # [1, T, ...]
-            camera = th.stack([fa["camera"] for fa in forced_actions], dim=1)    # [1, T, ...]
-            ac_seq = {"buttons": buttons, "camera": camera}
-            log_prob_2d = self.pi_head.logprob(ac_seq, pd_seq)  # [1, T]
-            log_prob_seq = log_prob_2d[0]  # [T]
+            # Stack forced actions to [B, T, ...] format
+            stacked_actions = {}
+            for key in forced_actions[0]:
+                stacked_actions[key] = th.stack([fa[key] for fa in forced_actions], dim=1)  # [B, T, ...]
+            
+            # Calculate log probabilities
+            log_prob_batch = self.pi_head.logprob(stacked_actions, pd_seq)  # [B, T]
+            log_prob_seq = log_prob_batch[0]  # [T]
         else:
-            # Sampling case (incomplete in your code)
-            ac_seq = self.pi_head.sample(pd_seq, deterministic=not stochastic)  # [1, T, ...]
-            log_prob_2d = self.pi_head.logprob(ac_seq, pd_seq)  # [1, T]
-            log_prob_seq = log_prob_2d[0]  # [T]
-
+            # Sample actions if no forced actions
+            ac_seq = self.pi_head.sample(pd_seq, deterministic=not stochastic)  # [B, T, ...]
+            log_prob_batch = self.pi_head.logprob(ac_seq, pd_seq)  # [B, T]
+            log_prob_seq = log_prob_batch[0]  # [T]
+        
+        # Denormalize and remove batch dimension for value predictions
         vpred_seq = self.value_head.denormalize(vpred_seq)[0]  # [T]
-        pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)     # [T, ...]
-
-        return pd_seq, vpred_seq, log_prob_seq, state_out
-
-
-
-    @th.no_grad()
-    def v(self, obs, first, state_in):
-        """Predict value for a given mdp observation"""
-        obs = tree_map(lambda x: x.unsqueeze(1), obs)
-        first = first.unsqueeze(1)
-
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
-
-        # After unsqueezing, squeeze back
-        return self.value_head.denormalize(vpred)[:, 0]
+        aux_vpred_seq = self.aux_value_head.denormalize(aux_vpred_seq)[0]  # [T]
+        
+        # Remove batch dimension from policy distribution
+        pd_seq = tree_map(lambda x: x[0].clone(), pd_seq)  # [T, ...]
+        
+        return pd_seq, vpred_seq, aux_vpred_seq, log_prob_seq, state_out
 
 
 class InverseActionNet(MinecraftPolicy):

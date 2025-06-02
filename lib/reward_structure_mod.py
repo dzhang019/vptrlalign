@@ -18,13 +18,38 @@ def custom_reward_function(obs, done, info, visited_chunks):
     reward = 0
 
     # Health-related rewards and penalties
-    if not done:
-        reward += 0.1  # Reward for staying alive
+    current_health = 20.0
     if "life_stats" in obs:
         life_stats = obs["life_stats"]
-        if life_stats.get("life", 20) < 10:  # Assuming 20 is max health
-            reward -= 30  # Penalty for low health
-            print("low heath")
+        current_health = life_stats.get("life", 20)
+    HEALTH_KEY = 'prev_health'
+    
+    if not done:
+        reward += 0.0002  # Reward for staying alive
+    
+    if HEALTH_KEY in visited_chunks:
+        prev_health = visited_chunks[HEALTH_KEY]
+        
+        # Calculate health change
+        health_change = current_health - prev_health
+        #print("health_change:{health_change}")
+        if health_change < 0:
+            # Penalty for damage taken
+            reward -= 0.8 * abs(health_change)
+            print(f"took {health_change} damage")
+    visited_chunks[HEALTH_KEY] = current_health
+    # if current_health <= 4:  # 2 hearts or less
+    #     # Exponential penalty as health approaches zero
+    #     reward -= 0.2 * (5 - current_health)**2
+    #     print("below 2 hearts")
+    # if "life_stats" in obs:
+    #     life_stats = obs["life_stats"]
+    #     #if life_stats.get("life", 20) < 10:  # Assuming 20 is max health
+    #     h = life_stats.get("life", 20)
+    #     lowhealth = 0.00024 * (20/life_stats.get("life", 20)-1)  # Penalty for low health
+    #     reward -= lowhealth
+        #print(f"Health at {h}, penalizing by {lowhealth}")
+
     # Exploration reward: New chunks
     xpos, ypos, zpos = 0, 0, 0
     if "location_stats" in obs:
@@ -33,21 +58,30 @@ def custom_reward_function(obs, done, info, visited_chunks):
         ypos = location_stats.get("ypos", 0)
         zpos = location_stats.get("zpos", 0)
 
-    current_chunk = (int(xpos) // 16, int(zpos) // 16)
-    if current_chunk not in visited_chunks:
-        reward += 5  # Reward for exploring new chunks
-        visited_chunks.add(current_chunk)
+    current_chunk = (int(xpos) // 4, int(zpos) // 4)
+    chunk_key = f"chunk_{current_chunk[0]}_{current_chunk[1]}"
+    if chunk_key not in visited_chunks:
+        visited_chunks[chunk_key] = True
+        if len(visited_chunks)>3:
+            reward += 1  # Reward for exploring new chunks
+        print("visited new chunk!")
 
     # Exploration reward: New depths
-    ypos_rounded = int(ypos)  # Round y-position to integer for tracking
-    if ypos_rounded not in visited_chunks:
-        reward += 2  # Reward for exploring new depths
-        visited_chunks.add(ypos_rounded)
+    # ypos_rounded = int(ypos)  # Round y-position to integer for tracking
+    # if ypos_rounded not in visited_chunks:
+    #     reward += 10  # Reward for exploring new depths
+    #     visited_chunks.add(ypos_rounded)
 
-    # Exploration reward: New biomes
-    biome_id = info.get("biome_id", None)
-    if biome_id is not None and biome_id not in visited_chunks:
-        reward += 3  # Reward for discovering new biomes
-        visited_chunks.add(biome_id)
+    #Exploration reward: New biomes
+    location_stats = obs["location_stats"]
+    biome_id = location_stats.get("biome_id", 0)
+    if biome_id is not 0:
+        biome_key = f"biome_{biome_id}"
+        if biome_key not in visited_chunks:
+            visited_chunks[biome_key] = True
+            print(f"visited new biome! {biome_key}")
+            if len(visited_chunks)>3:
+                print(f"got reward from biome! {biome_key}")
+                reward += 5  # Reward for discovering new biomes
 
     return reward, visited_chunks

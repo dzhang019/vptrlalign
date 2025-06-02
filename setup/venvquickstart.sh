@@ -20,7 +20,7 @@ echo "Installing PyTorch..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 #install gym, gym3, attr, attrs
-pip install gym gym3 aatr attrs
+pip install gym gym3 attr attrs
 
 #install models and weight files in current directory
 wget "https://openaipublic.blob.core.windows.net/minecraft-rl/models/foundation-model-2x.model" #2x model
